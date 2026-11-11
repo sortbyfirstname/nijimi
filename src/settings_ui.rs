@@ -25,9 +25,9 @@ use crate::geometry::AspectRatio;
 use crate::settings::{self, AppProfile, AppSettings, paths_match};
 use crate::{app, app_icon, startup};
 
-pub const WINDOW_TITLE: &str = "um•bee•ants";
-pub const WINDOW_TITLE_WIDE: &[u16] =
-    &[117, 109, 0x2022, 98, 101, 101, 0x2022, 97, 110, 116, 115, 0];
+pub const WINDOW_TITLE: &str = "nijimi";
+/// `WINDOW_TITLE` as a NUL-terminated UTF-16 string, for Win32 calls.
+pub const WINDOW_TITLE_WIDE: &[u16] = &[110, 105, 106, 105, 109, 105, 0];
 const ASPECT_PRESETS: [&str; 5] = ["16:9", "21:9", "32:9", "16:10", "4:3"];
 
 fn render_logo() -> Result<Arc<RenderImage>, String> {
@@ -51,7 +51,7 @@ impl Drop for SettingsMutex {
 
 pub fn run(recent_apps: Vec<PathBuf>) -> std::result::Result<(), String> {
     let mutex = unsafe {
-        CreateMutexW(None, true, w!("Local\\UmBeeAntsSettingsWindow"))
+        CreateMutexW(None, true, w!("Local\\NijimiSettingsWindow"))
             .map_err(|error| error.to_string())?
     };
     if unsafe { windows::Win32::Foundation::GetLastError() } == ERROR_ALREADY_EXISTS {
@@ -95,7 +95,7 @@ pub fn run(recent_apps: Vec<PathBuf>) -> std::result::Result<(), String> {
                 window.set_window_title(WINDOW_TITLE);
                 cx.new(|cx| SettingsView::new(initial_data, window, cx))
             }) {
-                app::show_error(&format!("um•bee•ants could not open:\n{error}"));
+                app::show_error(&format!("nijimi could not open:\n{error}"));
                 cx.quit();
                 return;
             }
@@ -831,7 +831,7 @@ impl SettingsView {
                         div()
                             .text_xs()
                             .text_color(rgb(0xa6a6a6))
-                            .child("Launch um•bee•ants in the tray when you sign in."),
+                            .child("Launch nijimi in the tray when you sign in."),
                     ),
             )
             .child(
@@ -1066,7 +1066,7 @@ mod tests {
         let decoded =
             String::from_utf16(&WINDOW_TITLE_WIDE[..WINDOW_TITLE_WIDE.len() - 1]).unwrap();
         assert_eq!(decoded, WINDOW_TITLE);
-        assert_eq!(WINDOW_TITLE, "um•bee•ants");
+        assert_eq!(WINDOW_TITLE, "nijimi");
     }
 
     #[test]

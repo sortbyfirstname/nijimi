@@ -15,7 +15,7 @@ const RUN_KEY: PCWSTR = w!(r"Software\Microsoft\Windows\CurrentVersion\Run");
 /// startup entry off, without removing it from `Run`.
 const STARTUP_APPROVED_KEY: PCWSTR =
     w!(r"Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run");
-const VALUE_NAME: PCWSTR = w!("um-bee-ants");
+const VALUE_NAME: PCWSTR = w!("nijimi");
 
 /// True if Windows will launch *this* executable at sign-in. An entry left behind by a copy
 /// that has since been moved counts as off, so turning the toggle on repairs the path.
@@ -132,14 +132,14 @@ mod tests {
 
     #[test]
     fn startup_command_quotes_the_path_and_matches_it_back() {
-        let executable = Path::new(r"C:\Program Files\um bee ants\um-bee-ants.exe");
+        let executable = Path::new(r"C:\Program Files\nijimi\nijimi.exe");
         let command = command_for(executable);
-        assert_eq!(command, r#""C:\Program Files\um bee ants\um-bee-ants.exe""#);
+        assert_eq!(command, r#""C:\Program Files\nijimi\nijimi.exe""#);
         assert!(command_matches(&command, executable));
         assert!(command_matches(
-            r#""c:\program files\UM BEE ANTS\um-bee-ants.exe""#,
+            r#""c:\program files\NIJIMI\nijimi.exe""#,
             executable
         ));
-        assert!(!command_matches(r#""D:\Old\um-bee-ants.exe""#, executable));
+        assert!(!command_matches(r#""D:\Old\nijimi.exe""#, executable));
     }
 }

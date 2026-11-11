@@ -39,7 +39,7 @@ use windows::core::{Error, Interface, Result, w};
 
 use crate::geometry::{AspectRatio, ScreenRect, ambient_regions, content_bounds, fit_content};
 
-const WINDOW_CLASS: windows::core::PCWSTR = w!("UmBeeAntsOverlayWindow");
+const WINDOW_CLASS: windows::core::PCWSTR = w!("NijimiOverlayWindow");
 const BLUR_SCALE: u32 = 4;
 const CAPTURE_RETRY_INITIAL: Duration = Duration::from_millis(250);
 const CAPTURE_RETRY_MAX: Duration = Duration::from_secs(4);
@@ -271,7 +271,7 @@ impl Renderer {
                         | windows::Win32::UI::WindowsAndMessaging::WS_EX_LAYERED.0,
                 ),
                 WINDOW_CLASS,
-                w!("um•bee•ants ambient overlay"),
+                w!("nijimi ambient overlay"),
                 WINDOW_STYLE(windows::Win32::UI::WindowsAndMessaging::WS_POPUP.0),
                 0,
                 0,

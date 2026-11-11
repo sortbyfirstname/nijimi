@@ -345,9 +345,7 @@ mod tests {
     fn rejects_missing_directory_and_nul_paths() {
         assert!(executable_icon(Path::new("")).is_none());
         assert!(executable_icon(&std::env::temp_dir()).is_none());
-        assert!(
-            executable_icon(&std::env::temp_dir().join("um-bee-ants-no-such-icon.exe")).is_none()
-        );
+        assert!(executable_icon(&std::env::temp_dir().join("nijimi-no-such-icon.exe")).is_none());
         assert!(executable_icon(&std::env::current_dir().unwrap().join("Cargo.toml")).is_none());
         let nul = PathBuf::from(OsString::from_wide(&[b'a' as u16, 0, b'b' as u16]));
         assert!(executable_icon(&nul).is_none());

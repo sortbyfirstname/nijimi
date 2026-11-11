@@ -92,7 +92,7 @@ const SETTINGS_ADD_DESCRIPTION_ID: i32 = 213;
 const SETTINGS_GLOBAL_SIDE_HELP_ID: i32 = 214;
 const SETTINGS_TABLE_SETTING_ID: i32 = 215;
 const SETTINGS_TABLE_VALUE_ID: i32 = 216;
-const TRAY_WINDOW_TITLE: PCWSTR = w!("um•bee•ants tray");
+const TRAY_WINDOW_TITLE: PCWSTR = w!("nijimi tray");
 const LB_SETHORIZONTALEXTENT_MESSAGE: u32 = 0x0194;
 const EN_CHANGE_NOTIFICATION: usize = 0x0300;
 const CBN_SELENDOK_NOTIFICATION: u16 = 9;
@@ -232,7 +232,7 @@ fn ensure_dpi_awareness() -> Result<()> {
 pub fn run() -> Result<()> {
     unsafe {
         ensure_dpi_awareness()?;
-        let mutex = CreateMutexW(None, false, w!("Local\\UmBeeAntsAmbientLight"))?;
+        let mutex = CreateMutexW(None, false, w!("Local\\NijimiAmbientLight"))?;
         if windows::Win32::Foundation::GetLastError() == ERROR_ALREADY_EXISTS {
             let _ = CloseHandle(mutex);
             return Ok(());
@@ -246,7 +246,7 @@ pub fn run() -> Result<()> {
             hInstance: instance,
             hCursor: LoadCursorW(None, IDC_ARROW)?,
             hIcon: class_icon,
-            lpszClassName: w!("UmBeeAntsTrayWindow"),
+            lpszClassName: w!("NijimiTrayWindow"),
             ..Default::default()
         };
         if RegisterClassW(&class) == 0 {
@@ -283,7 +283,7 @@ pub fn run() -> Result<()> {
         let state_ptr = (&mut *state) as *mut AppState;
         let hwnd = CreateWindowExW(
             WINDOW_EX_STYLE(0),
-            w!("UmBeeAntsTrayWindow"),
+            w!("NijimiTrayWindow"),
             TRAY_WINDOW_TITLE,
             WINDOW_STYLE(0),
             0,
@@ -382,7 +382,7 @@ pub fn show_error(message: &str) {
         MessageBoxW(
             HWND::default(),
             windows::core::PCWSTR(message.as_ptr()),
-            w!("um•bee•ants"),
+            w!("nijimi"),
             windows::Win32::UI::WindowsAndMessaging::MB_ICONERROR,
         );
     }
@@ -468,7 +468,7 @@ unsafe extern "system" fn window_proc(
                     show_error(&error);
                 }
             }
-            Err(error) => show_error(&format!("um•bee•ants could not reload settings:\n{error}")),
+            Err(error) => show_error(&format!("nijimi could not reload settings:\n{error}")),
         }
         return LRESULT(0);
     }
@@ -496,7 +496,7 @@ unsafe extern "system" fn window_proc(
                 state.active_ratio = None;
                 let _ = KillTimer(state.hwnd, RENDER_TIMER);
                 update_tray_tip(state.hwnd, false);
-                Some(format!("um•bee•ants stopped rendering:\n{error}"))
+                Some(format!("nijimi stopped rendering:\n{error}"))
             } else {
                 None
             }
@@ -515,9 +515,7 @@ unsafe extern "system" fn window_proc(
                 state.active_executable = None;
                 state.active_ratio = None;
                 let _ = KillTimer(state.hwnd, RENDER_TIMER);
-                Some(format!(
-                    "um•bee•ants could not refresh the display:\n{error}"
-                ))
+                Some(format!("nijimi could not refresh the display:\n{error}"))
             } else {
                 None
             }
@@ -754,7 +752,7 @@ fn update_foreground(state: &mut AppState) -> Option<String> {
                 }
             }
             if let Err(error) = result {
-                return Some(format!("um•bee•ants could not pause rendering:\n{error}"));
+                return Some(format!("nijimi could not pause rendering:\n{error}"));
             }
         }
         return None;
@@ -769,14 +767,14 @@ fn update_foreground(state: &mut AppState) -> Option<String> {
     }
     if let Err(error) = state.renderer.set_aspect_ratio(ratio) {
         return Some(format!(
-            "um•bee•ants could not apply the selected aspect ratio:\n{error}"
+            "nijimi could not apply the selected aspect ratio:\n{error}"
         ));
     }
     if let Err(error) = state.renderer.set_enabled(true) {
         state.rendering = false;
         state.active_executable = None;
         state.active_ratio = None;
-        return Some(format!("um•bee•ants could not start rendering:\n{error}"));
+        return Some(format!("nijimi could not start rendering:\n{error}"));
     }
     if unsafe { SetTimer(state.hwnd, RENDER_TIMER, 33, None) } == 0 {
         let error = Error::from_win32();
@@ -784,9 +782,7 @@ fn update_foreground(state: &mut AppState) -> Option<String> {
         state.rendering = false;
         state.active_executable = None;
         state.active_ratio = None;
-        return Some(format!(
-            "um•bee•ants could not start its render timer:\n{error}"
-        ));
+        return Some(format!("nijimi could not start its render timer:\n{error}"));
     }
     unsafe {
         let _ = KillTimer(state.hwnd, RELEASE_TIMER);
@@ -876,9 +872,9 @@ fn show_menu(hwnd: HWND) {
 
 fn set_tip(tray: &mut NOTIFYICONDATAW, enabled: bool) {
     let tip = if enabled {
-        "um•bee•ants"
+        "nijimi"
     } else {
-        "um•bee•ants - stopped after an error"
+        "nijimi - stopped after an error"
     };
     for (destination, source) in tray.szTip.iter_mut().zip(tip.encode_utf16().chain(Some(0))) {
         *destination = source;
@@ -902,15 +898,15 @@ unsafe fn open_settings(state_ptr: *mut AppState) -> Option<String> {
         process.args(&state.recent_apps);
         match process.spawn() {
             Ok(_) => None,
-            Err(error) => Some(format!("um•bee•ants could not open Settings:\n{error}")),
+            Err(error) => Some(format!("nijimi could not open Settings:\n{error}")),
         }
     }
 }
 
 pub(crate) fn notify_settings_changed() {
     unsafe {
-        let hwnd = FindWindowW(w!("UmBeeAntsTrayWindow"), windows::core::PCWSTR::null())
-            .unwrap_or_default();
+        let hwnd =
+            FindWindowW(w!("NijimiTrayWindow"), windows::core::PCWSTR::null()).unwrap_or_default();
         if !hwnd.0.is_null() {
             let _ = PostMessageW(hwnd, SETTINGS_RELOADED, WPARAM(0), LPARAM(0));
         }
@@ -1109,7 +1105,7 @@ fn create_settings_controls(parent: HWND) -> Result<()> {
         create_settings_control(
             parent,
             w!("STATIC"),
-            w!("UM•BEE•ANTS"),
+            w!("NIJIMI"),
             0x50000000,
             [26, 22, 400, 34],
             SETTINGS_HEADER_ID,
@@ -1695,7 +1691,7 @@ fn save_selected_profile(hwnd: HWND, state: &mut AppState) -> Option<String> {
     if let Err(error) = state.settings.save(&state.settings_path) {
         state.settings = previous;
         update_ratio_control(hwnd, state);
-        return Some(format!("um•bee•ants could not save settings:\n{error}"));
+        return Some(format!("nijimi could not save settings:\n{error}"));
     }
     update_foreground(state)
 }
@@ -1716,7 +1712,7 @@ fn save_global_ratio(hwnd: HWND, state: &mut AppState) -> Option<String> {
     if let Err(error) = state.settings.save(&state.settings_path) {
         state.settings = previous;
         update_global_ratio_control(hwnd, state);
-        return Some(format!("um•bee•ants could not save settings:\n{error}"));
+        return Some(format!("nijimi could not save settings:\n{error}"));
     }
     None
 }
@@ -1736,7 +1732,7 @@ fn add_selected_profile(hwnd: HWND, state: &mut AppState) -> Option<String> {
     state.settings.upsert(profile);
     if let Err(error) = state.settings.save(&state.settings_path) {
         state.settings = previous;
-        return Some(format!("um•bee•ants could not save settings:\n{error}"));
+        return Some(format!("nijimi could not save settings:\n{error}"));
     }
     state.settings_adding = false;
     update_settings_mode(hwnd, state);
@@ -1755,7 +1751,7 @@ fn remove_selected_profile(hwnd: HWND, state: &mut AppState) -> Option<String> {
     }
     if let Err(error) = state.settings.save(&state.settings_path) {
         state.settings = previous;
-        return Some(format!("um•bee•ants could not save settings:\n{error}"));
+        return Some(format!("nijimi could not save settings:\n{error}"));
     }
     refresh_settings_choices(state, hwnd, Some(executable));
     update_foreground(state)

@@ -1,14 +1,14 @@
 <#
 .SYNOPSIS
-    Measures um•bee•ants' CPU, GPU, and memory cost while a configured game is running.
+    Measures nijimi's CPU, GPU, and memory cost while a configured game is running.
 
 .DESCRIPTION
-    Start um•bee•ants (ideally a full `cargo build --release` build) and launch a game that has
+    Start nijimi (ideally a full `cargo build --release` build) and launch a game that has
     a profile, then run this script and switch to the game during the countdown. Keep the game in
     the foreground and play normally until sampling finishes.
 
     Each second it records which app is in the foreground, whether the ambient overlay is visible,
-    um•bee•ants' CPU, GPU-engine and memory use, and the foreground game's own GPU 3D use.
+    nijimi's CPU, GPU-engine and memory use, and the foreground game's own GPU 3D use.
     Statistics are computed only over seconds where the overlay was active.
 
 .EXAMPLE
@@ -22,7 +22,7 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
-Add-Type -Namespace UmBeeAnts -Name Win32 -MemberDefinition @'
+Add-Type -Namespace Nijimi -Name Win32 -MemberDefinition @'
 [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
 [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr hwnd, out uint pid);
 [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern IntPtr FindWindow(string cls, IntPtr title);
@@ -31,14 +31,14 @@ Add-Type -Namespace UmBeeAnts -Name Win32 -MemberDefinition @'
 
 function Get-ForegroundPid {
     $fgPid = [uint32]0
-    [void][UmBeeAnts.Win32]::GetWindowThreadProcessId([UmBeeAnts.Win32]::GetForegroundWindow(), [ref]$fgPid)
+    [void][Nijimi.Win32]::GetWindowThreadProcessId([Nijimi.Win32]::GetForegroundWindow(), [ref]$fgPid)
     return [int]$fgPid
 }
 
 function Test-OverlayVisible {
     # Title is an IntPtr so we can pass a real NULL; PowerShell turns $null strings into "".
-    $hwnd = [UmBeeAnts.Win32]::FindWindow('UmBeeAntsOverlayWindow', [IntPtr]::Zero)
-    return ($hwnd -ne [IntPtr]::Zero) -and [UmBeeAnts.Win32]::IsWindowVisible($hwnd)
+    $hwnd = [Nijimi.Win32]::FindWindow('NijimiOverlayWindow', [IntPtr]::Zero)
+    return ($hwnd -ne [IntPtr]::Zero) -and [Nijimi.Win32]::IsWindowVisible($hwnd)
 }
 
 function Get-PrivateWorkingSetMB([int]$processId) {
@@ -57,11 +57,11 @@ function Get-Stats([double[]]$values) {
 }
 
 # The tray process, not a Settings window (which runs the same exe with --settings).
-$trayProcess = Get-CimInstance Win32_Process -Filter "Name='um-bee-ants.exe'" |
+$trayProcess = Get-CimInstance Win32_Process -Filter "Name='nijimi.exe'" |
     Where-Object { $_.CommandLine -notmatch '--settings' } |
     Select-Object -First 1
 if (-not $trayProcess) {
-    Write-Error 'um-bee-ants is not running. Start it, launch a configured game, then run this script again.'
+    Write-Error 'nijimi is not running. Start it, launch a configured game, then run this script again.'
 }
 $appPid = [int]$trayProcess.ProcessId
 $app = Get-Process -Id $appPid
@@ -70,7 +70,7 @@ $gpuName = (Get-CimInstance Win32_VideoController | Where-Object { $_.CurrentHor
     Select-Object -First 1)
 $cpuName = (Get-CimInstance Win32_Processor | Select-Object -First 1).Name.Trim()
 
-Write-Host "um-bee-ants pid $appPid  ($($trayProcess.ExecutablePath))"
+Write-Host "nijimi pid $appPid  ($($trayProcess.ExecutablePath))"
 if ($trayProcess.ExecutablePath -notmatch '\\release\\') {
     Write-Warning 'This is not a target\release build; numbers may not represent a shipped build.'
 }
@@ -139,7 +139,7 @@ for ($second = 1; $second -le $Seconds; $second++) {
 }
 Write-Host ''
 
-$csvPath = Join-Path $env:TEMP ('um-bee-ants-perf-{0:yyyyMMdd-HHmmss}.csv' -f (Get-Date))
+$csvPath = Join-Path $env:TEMP ('nijimi-perf-{0:yyyyMMdd-HHmmss}.csv' -f (Get-Date))
 $samples | Export-Csv -NoTypeInformation -Path $csvPath
 
 $active = @($samples | Where-Object { $_.OverlayActive })
@@ -147,13 +147,13 @@ $games = ($active | Group-Object Foreground | Sort-Object Count -Descending | Fo
 
 $summary = @"
 
-===== um-bee-ants performance summary =====
+===== nijimi performance summary =====
 Hardware      : $cpuName, $($gpuName.Name) @ $($gpuName.CurrentHorizontalResolution)x$($gpuName.CurrentVerticalResolution) $($gpuName.CurrentRefreshRate) Hz
 Build         : $($trayProcess.ExecutablePath)
 Active samples: $($active.Count) of $Seconds s with the overlay visible
 Foreground    : $games
 
-um-bee-ants, while active
+nijimi, while active
   CPU (% of one core)   : $(Get-Stats ($active | ForEach-Object AppCpuPctOfCore))
   CPU (% of total)      : $(Get-Stats ($active | ForEach-Object AppCpuPctTotal))
   GPU 3D engine (%)     : $(Get-Stats ($active | ForEach-Object AppGpu3DPct))

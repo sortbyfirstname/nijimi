@@ -31,14 +31,14 @@ fn main() {
             Vec::new()
         };
         if let Err(error) = settings_ui::run(recent_apps) {
-            app::show_error(&format!("um•bee•ants could not start Settings:\n{error}"));
+            app::show_error(&format!("nijimi could not start Settings:\n{error}"));
         }
     } else if let Err(error) = app::run() {
-        app::show_error(&format!("um•bee•ants could not start:\n{error}"));
+        app::show_error(&format!("nijimi could not start:\n{error}"));
     }
 }
 
 #[cfg(not(windows))]
 fn main() {
-    eprintln!("um•bee•ants is a Windows-only application.");
+    eprintln!("nijimi is a Windows-only application.");
 }

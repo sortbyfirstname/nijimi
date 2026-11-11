@@ -4,8 +4,8 @@ use std::path::{Path, PathBuf};
 
 use crate::geometry::AspectRatio;
 
-const CONFIG_FILE_NAME: &str = "um-bee-ants.ini";
-const APP_DIR_NAME: &str = "um-bee-ants";
+const CONFIG_FILE_NAME: &str = "nijimi.ini";
+const APP_DIR_NAME: &str = "nijimi";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AppProfile {
@@ -197,7 +197,7 @@ pub fn filter_app_choices(paths: &[PathBuf], query: &str) -> Vec<PathBuf> {
 }
 
 /// Settings live beside the executable (portable), unless that folder isn't writable (e.g. it's
-/// in Program Files), in which case they go in `%APPDATA%\um-bee-ants`.
+/// in Program Files), in which case they go in `%APPDATA%\nijimi`.
 pub fn config_path() -> Result<PathBuf> {
     let executable = std::env::current_exe()?;
     let executable_dir = executable
@@ -232,7 +232,7 @@ fn resolve_config_path(
 }
 
 fn is_dir_writable(dir: &Path) -> bool {
-    let probe = dir.join(format!(".um-bee-ants-write-test-{}", std::process::id()));
+    let probe = dir.join(format!(".nijimi-write-test-{}", std::process::id()));
     match fs::OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -250,7 +250,7 @@ fn is_dir_writable(dir: &Path) -> bool {
 fn invalid_line(line_number: usize) -> Error {
     Error::new(
         ErrorKind::InvalidData,
-        format!("invalid um-bee-ants settings line {}", line_number + 1),
+        format!("invalid nijimi settings line {}", line_number + 1),
     )
 }
 
@@ -299,7 +299,7 @@ mod tests {
             .unwrap()
             .as_nanos();
         let root = std::env::temp_dir().join(format!(
-            "um-bee-ants-config-path-{}-{unique}",
+            "nijimi-config-path-{}-{unique}",
             std::process::id()
         ));
         let exe_dir = root.join("app");
@@ -347,10 +347,8 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let directory = std::env::temp_dir().join(format!(
-            "um-bee-ants-migration-{}-{unique}",
-            std::process::id()
-        ));
+        let directory =
+            std::env::temp_dir().join(format!("nijimi-migration-{}-{unique}", std::process::id()));
         fs::create_dir(&directory).unwrap();
         let path = directory.join(CONFIG_FILE_NAME);
         let source_path = directory.join("previous.ini");
@@ -375,10 +373,8 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let directory = std::env::temp_dir().join(format!(
-            "um-bee-ants-invalid-{}-{unique}",
-            std::process::id()
-        ));
+        let directory =
+            std::env::temp_dir().join(format!("nijimi-invalid-{}-{unique}", std::process::id()));
         fs::create_dir(&directory).unwrap();
         let path = directory.join(CONFIG_FILE_NAME);
         fs::write(&path, "not-a-profile\n").unwrap();
@@ -400,7 +396,7 @@ mod tests {
             .unwrap()
             .as_nanos();
         let path = std::env::temp_dir().join(format!(
-            "um-bee-ants-settings-{}-{unique}.ini",
+            "nijimi-settings-{}-{unique}.ini",
             std::process::id()
         ));
         let mut settings = AppSettings::default();
@@ -451,7 +447,7 @@ mod tests {
             .unwrap()
             .as_nanos();
         let path = std::env::temp_dir().join(format!(
-            "um-bee-ants-settings-invalid-{}-{unique}.ini",
+            "nijimi-settings-invalid-{}-{unique}.ini",
             std::process::id()
         ));
         fs::write(&path, "not-a-profile\n").unwrap();
@@ -469,7 +465,7 @@ mod tests {
             .unwrap()
             .as_nanos();
         let path = std::env::temp_dir().join(format!(
-            "um-bee-ants-settings-default-{}-{unique}.ini",
+            "nijimi-settings-default-{}-{unique}.ini",
             std::process::id()
         ));
         fs::write(&path, "16:9|G:\\Games\\Example.exe\n").unwrap();
@@ -503,7 +499,7 @@ mod tests {
             &recent,
             &running,
             &profiles,
-            Path::new(r"P:\Apps\um-bee-ants.exe"),
+            Path::new(r"P:\Apps\nijimi.exe"),
             Some(Path::new(r"E:\Browse\Chosen.exe")),
         );
         assert_eq!(
