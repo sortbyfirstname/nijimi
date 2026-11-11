@@ -16,6 +16,14 @@
 
 Playing a 16:9 game on an ultrawide monitor, or a 4:3 classic on a widescreen one, leaves you with large black bars on either side. nijimi fills those bars with a soft, blurred glow taken from the edges of the game itself, so the picture seems to spill out across the whole screen instead of stopping at a hard edge.
 
+**Without nijimi**, a 16:9 game on a 21:9 monitor:
+
+![Persona 5 Royal's intro in 16:9 on an ultrawide monitor, with black bars on both sides](assets/screenshots/p5r-intro-before.png)
+
+**With nijimi**, the bars glow with the colours at the edges of the picture:
+
+![The same frame with nijimi on: the green and yellow of the picture's edges blur softly out into the bars](assets/screenshots/p5r-intro-after.png)
+
 It's built to be forgotten about. Set an aspect ratio for each game once, and nijimi switches on by itself when that game is in front and off again when you Alt-Tab away. There's no window to manage, nothing to install, and no background service.
 
 It's also built to cost your games next to nothing. The whole effect runs on the GPU, with the glow blurred at a fraction of your screen's resolution, nothing renders unless a configured game is in focus, and when idle it uses effectively no CPU (see [the numbers](#lightweight-by-design)).
