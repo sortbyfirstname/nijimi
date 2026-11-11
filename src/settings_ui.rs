@@ -1490,7 +1490,9 @@ impl Render for SettingsView {
                     .flex()
                     .flex_1()
                     .min_h_0()
-                    .child(self.render_sidebar(cx))
+                    .children(
+                        (self.page != SettingsPage::Global).then(|| self.render_sidebar(cx)),
+                    )
                     .child(
                         div()
                             .flex()
