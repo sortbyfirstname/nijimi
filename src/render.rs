@@ -2,7 +2,7 @@ use std::mem::size_of;
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
-use windows::Win32::Foundation::{BOOL, COLORREF, HWND, RECT};
+use windows::Win32::Foundation::{BOOL, COLORREF, E_ACCESSDENIED, HWND, RECT};
 use windows::Win32::Graphics::Direct3D::{
     D3D_DRIVER_TYPE_UNKNOWN, D3D_FEATURE_LEVEL_10_0, D3D_FEATURE_LEVEL_10_1,
     D3D_FEATURE_LEVEL_11_0, D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST,
@@ -23,19 +23,20 @@ use windows::Win32::Graphics::Dxgi::Common::{
     DXGI_ALPHA_MODE_PREMULTIPLIED, DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_SAMPLE_DESC,
 };
 use windows::Win32::Graphics::Dxgi::{
-    CreateDXGIFactory1, DXGI_ERROR_WAIT_TIMEOUT, DXGI_PRESENT, DXGI_SCALING_STRETCH,
-    DXGI_SWAP_CHAIN_DESC1, DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL, DXGI_USAGE_RENDER_TARGET_OUTPUT,
-    IDXGIAdapter, IDXGIAdapter1, IDXGIDevice, IDXGIFactory2, IDXGIOutput1, IDXGIOutputDuplication,
-    IDXGISwapChain1,
+    CreateDXGIFactory1, DXGI_ERROR_NOT_CURRENTLY_AVAILABLE, DXGI_ERROR_SESSION_DISCONNECTED,
+    DXGI_ERROR_WAIT_TIMEOUT, DXGI_PRESENT, DXGI_SCALING_STRETCH, DXGI_SWAP_CHAIN_DESC1,
+    DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL, DXGI_USAGE_RENDER_TARGET_OUTPUT, IDXGIAdapter, IDXGIAdapter1,
+    IDXGIDevice, IDXGIFactory2, IDXGIOutput1, IDXGIOutputDuplication, IDXGISwapChain1,
 };
 use windows::Win32::Graphics::Gdi::{MONITOR_DEFAULTTOPRIMARY, MonitorFromPoint};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, LWA_ALPHA, RegisterClassW, SW_HIDE, SW_SHOWNOACTIVATE,
     SWP_NOACTIVATE, SetLayeredWindowAttributes, SetWindowDisplayAffinity, SetWindowPos, ShowWindow,
-    WDA_EXCLUDEFROMCAPTURE, WINDOW_DISPLAY_AFFINITY, WINDOW_EX_STYLE, WINDOW_STYLE, WNDCLASSW,
+    WDA_EXCLUDEFROMCAPTURE, WDA_NONE, WINDOW_DISPLAY_AFFINITY, WINDOW_EX_STYLE, WINDOW_STYLE,
+    WNDCLASSW,
 };
-use windows::core::{Error, Interface, Result, w};
+use windows::core::{Error, HRESULT, Interface, Result, w};
 
 use crate::geometry::{AspectRatio, ScreenRect, ambient_regions, content_bounds, fit_content};
 
@@ -55,8 +56,10 @@ pub struct Renderer {
     height: u32,
     enabled: bool,
     aspect_ratio: AspectRatio,
+    capturable: bool,
     scene: SceneGeometry,
     gpu: Option<Gpu>,
+    rebuild_retry: CaptureRetry,
     _window: OverlayWindow,
 }
 
@@ -232,10 +235,10 @@ impl Drop for OverlayWindow {
 
 impl Renderer {
     pub fn new() -> Result<Self> {
-        Self::with_aspect_ratio(AspectRatio::new(16, 9).unwrap())
+        Self::with_options(AspectRatio::new(16, 9).unwrap(), false)
     }
 
-    fn with_aspect_ratio(aspect_ratio: AspectRatio) -> Result<Self> {
+    fn with_options(aspect_ratio: AspectRatio, capturable: bool) -> Result<Self> {
         unsafe {
             let width = windows::Win32::UI::WindowsAndMessaging::GetSystemMetrics(
                 windows::Win32::UI::WindowsAndMessaging::SM_CXSCREEN,
@@ -284,7 +287,7 @@ impl Renderer {
             )?;
             let window = OverlayWindow(hwnd);
             SetLayeredWindowAttributes(hwnd, COLORREF(0), 255, LWA_ALPHA)?;
-            SetWindowDisplayAffinity(hwnd, WINDOW_DISPLAY_AFFINITY(WDA_EXCLUDEFROMCAPTURE.0))?;
+            set_display_affinity(hwnd, capturable)?;
             SetWindowPos(
                 hwnd,
                 windows::Win32::UI::WindowsAndMessaging::HWND_TOPMOST,
@@ -301,8 +304,10 @@ impl Renderer {
                 height,
                 enabled: false,
                 aspect_ratio,
+                capturable,
                 scene,
                 gpu: None,
+                rebuild_retry: CaptureRetry::default(),
                 _window: window,
             })
         }
@@ -315,6 +320,15 @@ impl Renderer {
         Ok(())
     }
 
+    // Capturing the overlay is safe: the shader only samples the content area, which it leaves clear.
+    pub fn set_capturable(&mut self, capturable: bool) -> Result<()> {
+        if capturable != self.capturable {
+            set_display_affinity(self.hwnd, capturable)?;
+            self.capturable = capturable;
+        }
+        Ok(())
+    }
+
     pub fn set_enabled(&mut self, enabled: bool) -> Result<()> {
         if enabled {
             if self.gpu.is_none() {
@@ -322,8 +336,11 @@ impl Renderer {
             }
             let gpu = self.gpu.as_mut().unwrap();
             if gpu.duplication.is_none() {
-                gpu.duplication = Some(unsafe { gpu.output.DuplicateOutput(&gpu.device)? });
+                // On failure, `render` retries and rebuilds the device if needed.
+                gpu.capture_retry.reset();
+                gpu.duplication = unsafe { gpu.output.DuplicateOutput(&gpu.device) }.ok();
             }
+            self.rebuild_retry.reset();
             self.enabled = true;
             let _ = unsafe { ShowWindow(self.hwnd, SW_SHOWNOACTIVATE) };
         } else {
@@ -355,6 +372,12 @@ impl Renderer {
         Ok(())
     }
 
+    pub fn is_capturing(&self) -> bool {
+        self.gpu
+            .as_ref()
+            .is_some_and(|gpu| gpu.duplication.is_some())
+    }
+
     /// Frees all GPU resources if the overlay is not currently active.
     pub fn release_gpu(&mut self) {
         if !self.enabled {
@@ -364,7 +387,7 @@ impl Renderer {
 
     pub fn refresh(&mut self, enabled: bool) -> Result<()> {
         let _ = self.set_enabled(false);
-        let mut replacement = Self::with_aspect_ratio(self.aspect_ratio)?;
+        let mut replacement = Self::with_options(self.aspect_ratio, self.capturable)?;
         replacement.set_enabled(enabled)?;
         *self = replacement;
         Ok(())
@@ -387,11 +410,42 @@ impl Renderer {
         if width != self.width || height != self.height {
             return self.refresh(true);
         }
-        match self.gpu.as_mut() {
-            Some(gpu) => gpu.render(&self.scene),
-            None => Ok(()),
+        if self.gpu.is_none() {
+            if !self.rebuild_retry.is_ready() {
+                return Ok(());
+            }
+            match Gpu::new(self.hwnd, self.width, self.height) {
+                Ok(gpu) => self.gpu = Some(gpu),
+                Err(_) => {
+                    self.rebuild_retry.schedule();
+                    return Ok(());
+                }
+            }
         }
+        if self.gpu.as_mut().unwrap().render(&self.scene)? == Capture::Stale {
+            self.gpu = None;
+            self.rebuild_retry.schedule();
+        } else if self.gpu.as_ref().unwrap().duplication.is_some() {
+            self.rebuild_retry.reset();
+        }
+        Ok(())
     }
+}
+
+/// E_ACCESSDENIED means a secure desktop (lock screen or UAC prompt) is showing.
+fn is_transient_capture_error(code: HRESULT) -> bool {
+    [
+        E_ACCESSDENIED,
+        DXGI_ERROR_NOT_CURRENTLY_AVAILABLE,
+        DXGI_ERROR_SESSION_DISCONNECTED,
+    ]
+    .contains(&code)
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Capture {
+    Healthy,
+    Stale,
 }
 
 impl Gpu {
@@ -600,20 +654,21 @@ impl Gpu {
         }
     }
 
-    fn render(&mut self, scene: &SceneGeometry) -> Result<()> {
+    fn render(&mut self, scene: &SceneGeometry) -> Result<Capture> {
         if self.duplication.is_none() {
             if !self.capture_retry.is_ready() {
-                return Ok(());
+                return Ok(Capture::Healthy);
             }
             match unsafe { self.output.DuplicateOutput(&self.device) } {
                 Ok(duplication) => {
                     self.duplication = Some(duplication);
                     self.capture_retry.reset();
                 }
-                Err(_) => {
+                Err(error) if is_transient_capture_error(error.code()) => {
                     self.capture_retry.schedule();
-                    return Ok(());
+                    return Ok(Capture::Healthy);
                 }
+                Err(_) => return Ok(Capture::Stale),
             }
         }
         let duplication = self.duplication.as_ref().unwrap();
@@ -627,16 +682,18 @@ impl Gpu {
             )
         } {
             if error.code() == DXGI_ERROR_WAIT_TIMEOUT {
-                return if self.has_captured_frame {
-                    unsafe { self.draw(scene, &self.captured_view) }
-                } else {
-                    Ok(())
-                };
+                if self.has_captured_frame {
+                    unsafe { self.draw(scene, &self.captured_view)? };
+                }
+                return Ok(Capture::Healthy);
             }
             self.duplication = None;
             self.has_captured_frame = false;
             self.capture_retry.schedule();
-            return self.clear_overlay();
+            return Ok(match self.clear_overlay() {
+                Ok(()) => Capture::Healthy,
+                Err(_) => Capture::Stale,
+            });
         }
 
         let frame_result: Result<()> = unsafe {
@@ -648,7 +705,8 @@ impl Gpu {
         let release_result = unsafe { duplication.ReleaseFrame() };
         frame_result?;
         release_result?;
-        unsafe { self.draw(scene, &self.captured_view) }
+        unsafe { self.draw(scene, &self.captured_view)? };
+        Ok(Capture::Healthy)
     }
 
     unsafe fn draw(&self, scene: &SceneGeometry, source: &ID3D11ShaderResourceView) -> Result<()> {
@@ -914,6 +972,15 @@ unsafe fn draw_fullscreen_pass(pipeline: &FullscreenPipeline<'_>, pass: Fullscre
             .context
             .PSSetShaderResources(0, Some(&[None, None, None, None]));
     }
+}
+
+fn set_display_affinity(hwnd: HWND, capturable: bool) -> Result<()> {
+    let affinity = if capturable {
+        WDA_NONE
+    } else {
+        WDA_EXCLUDEFROMCAPTURE
+    };
+    unsafe { SetWindowDisplayAffinity(hwnd, WINDOW_DISPLAY_AFFINITY(affinity.0)) }
 }
 
 unsafe extern "system" fn overlay_window_proc(

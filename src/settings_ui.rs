@@ -802,45 +802,62 @@ impl SettingsView {
             .child(div().text_sm().text_color(rgb(0xb0b0b0)).child(
                 "New profiles start with this ratio. Existing app settings are not changed.",
             ))
-            .child(self.render_startup_card(cx))
+            .child(
+                toggle_card(
+                    "Always on",
+                    "Show the effect over every app, not just profiled games. Apps without a profile use the default ratio.",
+                )
+                .child(
+                    Switch::new("always-on")
+                        .checked(self.settings.always_on)
+                        .on_click(cx.listener(|this, checked: &bool, _, cx| {
+                            this.update_flag(|settings| settings.always_on = *checked, cx);
+                        })),
+                ),
+            )
+            .child(
+                toggle_card(
+                    "Show in screenshots",
+                    "Let screenshots and recordings capture the effect. When off, they show black bars instead.",
+                )
+                .child(
+                    Switch::new("show-in-screenshots")
+                        .checked(self.settings.show_in_screenshots)
+                        .on_click(cx.listener(|this, checked: &bool, _, cx| {
+                            this.update_flag(
+                                |settings| settings.show_in_screenshots = *checked,
+                                cx,
+                            );
+                        })),
+                ),
+            )
+            .child(
+                toggle_card(
+                    "Start with Windows",
+                    "Launch nijimi in the tray when you sign in.",
+                )
+                .child(
+                    Switch::new("start-with-windows")
+                        .checked(self.start_with_windows)
+                        .on_click(cx.listener(|this, checked: &bool, _, cx| {
+                            this.set_start_with_windows(*checked, cx);
+                        })),
+                ),
+            )
     }
 
-    fn render_startup_card(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        div()
-            .flex()
-            .items_center()
-            .justify_between()
-            .gap_5()
-            .p_5()
-            .rounded_lg()
-            .bg(rgb(0x252525))
-            .border_1()
-            .border_color(rgb(0x383838))
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap_1()
-                    .child(
-                        div()
-                            .text_sm()
-                            .text_color(rgb(0xe5e5e5))
-                            .child("Start with Windows"),
-                    )
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(rgb(0xa6a6a6))
-                            .child("Launch nijimi in the tray when you sign in."),
-                    ),
-            )
-            .child(
-                Switch::new("start-with-windows")
-                    .checked(self.start_with_windows)
-                    .on_click(cx.listener(|this, checked: &bool, _, cx| {
-                        this.set_start_with_windows(*checked, cx);
-                    })),
-            )
+    fn update_flag(&mut self, change: impl FnOnce(&mut AppSettings), cx: &mut Context<Self>) {
+        let mut updated = self.settings.clone();
+        change(&mut updated);
+        match updated.save(&self.settings_path) {
+            Ok(()) => {
+                self.settings = updated;
+                self.error = None;
+                app::notify_settings_changed();
+            }
+            Err(error) => self.error = Some(format!("Could not save settings: {error}")),
+        }
+        cx.notify();
     }
 
     fn set_start_with_windows(&mut self, enabled: bool, cx: &mut Context<Self>) {
@@ -1029,6 +1046,27 @@ impl Render for SettingsView {
                     ),
             )
     }
+}
+
+fn toggle_card(title: &'static str, description: &'static str) -> gpui_kit::Div {
+    div()
+        .flex()
+        .items_center()
+        .justify_between()
+        .gap_5()
+        .p_5()
+        .rounded_lg()
+        .bg(rgb(0x252525))
+        .border_1()
+        .border_color(rgb(0x383838))
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .gap_1()
+                .child(div().text_sm().text_color(rgb(0xe5e5e5)).child(title))
+                .child(div().text_xs().text_color(rgb(0xa6a6a6)).child(description)),
+        )
 }
 
 fn file_name(path: &Path) -> String {

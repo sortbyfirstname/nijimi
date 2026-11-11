@@ -152,6 +152,7 @@ struct AppState {
     settings_choices: Vec<PathBuf>,
     settings_hwnd: HWND,
     settings_palette: Option<SettingsPalette>,
+    tray_status: TrayStatus,
 }
 
 struct SettingsPalette {
@@ -260,9 +261,11 @@ pub fn run() -> Result<()> {
         if taskbar_created == 0 {
             return Err(Error::from_win32());
         }
+        let mut renderer = Renderer::new()?;
+        renderer.set_capturable(settings.show_in_screenshots)?;
         let mut state = Box::new(AppState {
             hwnd: HWND::default(),
-            renderer: Renderer::new()?,
+            renderer,
             enabled: true,
             rendering: false,
             active_executable: None,
@@ -279,6 +282,7 @@ pub fn run() -> Result<()> {
             settings_choices: Vec::new(),
             settings_hwnd: HWND::default(),
             settings_palette: None,
+            tray_status: TrayStatus::Ready,
         });
         let state_ptr = (&mut *state) as *mut AppState;
         let hwnd = CreateWindowExW(
@@ -297,7 +301,7 @@ pub fn run() -> Result<()> {
         )?;
         state.hwnd = hwnd;
 
-        let tray = tray_data(hwnd, icon, true);
+        let tray = tray_data(hwnd, icon, TrayStatus::Ready);
         if !Shell_NotifyIconW(NIM_ADD, &tray).as_bool() {
             let error = Error::from_win32();
             let _ = DestroyWindow(hwnd);
@@ -445,7 +449,7 @@ unsafe extern "system" fn window_proc(
     let taskbar_created = unsafe { (*state_ptr).taskbar_created };
     if message == taskbar_created {
         let state = unsafe { &*state_ptr };
-        let tray = tray_data(state.hwnd, state.icon, state.enabled);
+        let tray = tray_data(state.hwnd, state.icon, state.tray_status);
         unsafe {
             let _ = Shell_NotifyIconW(NIM_ADD, &tray);
         }
@@ -462,6 +466,11 @@ unsafe extern "system" fn window_proc(
         let state = unsafe { &mut *state_ptr };
         match AppSettings::load(&state.settings_path) {
             Ok(settings) => {
+                if let Err(error) = state.renderer.set_capturable(settings.show_in_screenshots) {
+                    show_error(&format!(
+                        "nijimi could not change whether screenshots show the effect:\n{error}"
+                    ));
+                }
                 state.settings = settings;
                 rearm_after_error(state);
                 if let Some(error) = update_foreground(state) {
@@ -495,9 +504,10 @@ unsafe extern "system" fn window_proc(
                 state.active_executable = None;
                 state.active_ratio = None;
                 let _ = KillTimer(state.hwnd, RENDER_TIMER);
-                update_tray_tip(state.hwnd, false);
+                sync_tray_status(state);
                 Some(format!("nijimi stopped rendering:\n{error}"))
             } else {
+                sync_tray_status(state);
                 None
             }
         };
@@ -515,6 +525,7 @@ unsafe extern "system" fn window_proc(
                 state.active_executable = None;
                 state.active_ratio = None;
                 let _ = KillTimer(state.hwnd, RENDER_TIMER);
+                sync_tray_status(state);
                 Some(format!("nijimi could not refresh the display:\n{error}"))
             } else {
                 None
@@ -537,7 +548,7 @@ unsafe extern "system" fn window_proc(
 fn rearm_after_error(state: &mut AppState) {
     if !state.enabled {
         state.enabled = true;
-        update_tray_tip(state.hwnd, true);
+        sync_tray_status(state);
     }
 }
 
@@ -704,6 +715,12 @@ pub(crate) fn browse_executable_for_settings() -> Option<PathBuf> {
 }
 
 fn update_foreground(state: &mut AppState) -> Option<String> {
+    let error = apply_foreground(state);
+    sync_tray_status(state);
+    error
+}
+
+fn apply_foreground(state: &mut AppState) -> Option<String> {
     let foreground = foreground_executable();
     let executable = foreground.as_ref().map(|(path, _)| path);
     if let Some(executable) = executable
@@ -726,18 +743,15 @@ fn update_foreground(state: &mut AppState) -> Option<String> {
         }
     }
 
-    let selected =
-        if executable.is_some_and(|path| paths_match(path, &state.application_executable)) {
-            None
-        } else {
-            state.settings.active_profile(
-                state.enabled,
-                foreground
-                    .as_ref()
-                    .is_some_and(|(_, on_primary)| *on_primary),
-                executable.map(PathBuf::as_path),
-            )
-        };
+    let selected = state.settings.active_profile(
+        state.enabled,
+        foreground
+            .as_ref()
+            .is_some_and(|(_, on_primary)| *on_primary),
+        executable
+            .filter(|path| !paths_match(path, &state.application_executable))
+            .map(PathBuf::as_path),
+    );
     if !state.enabled || selected.is_none() {
         if state.rendering {
             let result = state.renderer.pause();
@@ -759,9 +773,7 @@ fn update_foreground(state: &mut AppState) -> Option<String> {
     }
 
     let (executable, ratio) = selected.unwrap();
-    if state.rendering
-        && state.active_executable.as_deref() == Some(executable.as_path())
-        && state.active_ratio == Some(ratio)
+    if state.rendering && state.active_executable == executable && state.active_ratio == Some(ratio)
     {
         return None;
     }
@@ -788,26 +800,44 @@ fn update_foreground(state: &mut AppState) -> Option<String> {
         let _ = KillTimer(state.hwnd, RELEASE_TIMER);
     }
     state.rendering = true;
-    state.active_executable = Some(executable);
+    state.active_executable = executable;
     state.active_ratio = Some(ratio);
     None
 }
 
-fn update_tray_tip(hwnd: HWND, enabled: bool) {
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TrayStatus {
+    Ready,
+    CaptureUnavailable,
+    Stopped,
+}
+
+fn sync_tray_status(state: &mut AppState) {
+    let status = if !state.enabled {
+        TrayStatus::Stopped
+    } else if state.rendering && !state.renderer.is_capturing() {
+        TrayStatus::CaptureUnavailable
+    } else {
+        TrayStatus::Ready
+    };
+    if status == state.tray_status {
+        return;
+    }
+    state.tray_status = status;
     unsafe {
         let mut tray = NOTIFYICONDATAW {
             cbSize: size_of::<NOTIFYICONDATAW>() as u32,
-            hWnd: hwnd,
+            hWnd: state.hwnd,
             uID: 1,
             uFlags: NIF_TIP,
             ..Default::default()
         };
-        set_tip(&mut tray, enabled);
+        set_tip(&mut tray, status);
         let _ = Shell_NotifyIconW(NIM_MODIFY, &tray);
     }
 }
 
-fn tray_data(hwnd: HWND, icon: HICON, enabled: bool) -> NOTIFYICONDATAW {
+fn tray_data(hwnd: HWND, icon: HICON, status: TrayStatus) -> NOTIFYICONDATAW {
     let mut tray = NOTIFYICONDATAW {
         cbSize: size_of::<NOTIFYICONDATAW>() as u32,
         hWnd: hwnd,
@@ -817,7 +847,7 @@ fn tray_data(hwnd: HWND, icon: HICON, enabled: bool) -> NOTIFYICONDATAW {
         hIcon: icon,
         ..Default::default()
     };
-    set_tip(&mut tray, enabled);
+    set_tip(&mut tray, status);
     tray
 }
 
@@ -870,11 +900,11 @@ fn show_menu(hwnd: HWND) {
     }
 }
 
-fn set_tip(tray: &mut NOTIFYICONDATAW, enabled: bool) {
-    let tip = if enabled {
-        "nijimi"
-    } else {
-        "nijimi - stopped after an error"
+fn set_tip(tray: &mut NOTIFYICONDATAW, status: TrayStatus) {
+    let tip = match status {
+        TrayStatus::Ready => "nijimi",
+        TrayStatus::CaptureUnavailable => "nijimi - screen capture unavailable, retrying",
+        TrayStatus::Stopped => "nijimi - stopped after an error",
     };
     for (destination, source) in tray.szTip.iter_mut().zip(tip.encode_utf16().chain(Some(0))) {
         *destination = source;

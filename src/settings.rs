@@ -16,6 +16,8 @@ pub struct AppProfile {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AppSettings {
     pub default_aspect_ratio: AspectRatio,
+    pub always_on: bool,
+    pub show_in_screenshots: bool,
     pub profiles: Vec<AppProfile>,
 }
 
@@ -23,6 +25,8 @@ impl Default for AppSettings {
     fn default() -> Self {
         Self {
             default_aspect_ratio: AspectRatio::new(21, 9).unwrap(),
+            always_on: false,
+            show_in_screenshots: false,
             profiles: Vec::new(),
         }
     }
@@ -60,6 +64,19 @@ impl AppSettings {
                     AspectRatio::parse(executable).ok_or_else(|| invalid_line(line_number))?;
                 continue;
             }
+            let flag = match ratio {
+                "@always_on" => Some(&mut settings.always_on),
+                "@show_in_screenshots" => Some(&mut settings.show_in_screenshots),
+                _ => None,
+            };
+            if let Some(flag) = flag {
+                *flag = match executable.trim() {
+                    "1" => true,
+                    "0" => false,
+                    _ => return Err(invalid_line(line_number)),
+                };
+                continue;
+            }
             let aspect_ratio =
                 AspectRatio::parse(ratio).ok_or_else(|| invalid_line(line_number))?;
             let executable = executable.trim();
@@ -80,6 +97,13 @@ impl AppSettings {
             "@global|{}:{}\n",
             self.default_aspect_ratio.width, self.default_aspect_ratio.height
         ));
+        // Omitted when off so older builds, which reject unknown lines, can still load the file.
+        if self.always_on {
+            contents.push_str("@always_on|1\n");
+        }
+        if self.show_in_screenshots {
+            contents.push_str("@show_in_screenshots|1\n");
+        }
         for profile in &self.profiles {
             let executable = profile.executable.to_str().ok_or_else(|| {
                 Error::new(
@@ -139,13 +163,20 @@ impl AppSettings {
         enabled: bool,
         on_primary_display: bool,
         foreground: Option<&Path>,
-    ) -> Option<(PathBuf, AspectRatio)> {
-        if !enabled || !on_primary_display {
+    ) -> Option<(Option<PathBuf>, AspectRatio)> {
+        if !enabled {
             return None;
         }
-        let executable = foreground?;
-        self.ratio_for(executable)
-            .map(|ratio| (executable.to_path_buf(), ratio))
+        let profile = foreground
+            .filter(|_| on_primary_display)
+            .and_then(|executable| {
+                self.ratio_for(executable)
+                    .map(|ratio| (Some(executable.to_path_buf()), ratio))
+            });
+        if profile.is_none() && self.always_on {
+            return Some((None, self.default_aspect_ratio));
+        }
+        profile
     }
 }
 
@@ -539,7 +570,10 @@ mod tests {
         let matching = Path::new(r"c:\games\EXAMPLE.EXE");
         assert_eq!(
             settings.active_profile(true, true, Some(matching)),
-            Some((matching.to_path_buf(), AspectRatio::new(21, 9).unwrap()))
+            Some((
+                Some(matching.to_path_buf()),
+                AspectRatio::new(21, 9).unwrap()
+            ))
         );
         assert_eq!(settings.active_profile(false, true, Some(matching)), None);
         assert_eq!(settings.active_profile(true, false, Some(matching)), None);
@@ -548,5 +582,74 @@ mod tests {
             None
         );
         assert_eq!(settings.active_profile(true, true, None), None);
+    }
+
+    #[test]
+    fn always_on_renders_unprofiled_apps_at_the_default_ratio() {
+        let mut settings = AppSettings {
+            default_aspect_ratio: AspectRatio::new(16, 9).unwrap(),
+            always_on: true,
+            ..AppSettings::default()
+        };
+        settings.upsert(AppProfile {
+            executable: PathBuf::from(r"C:\Games\Example.exe"),
+            aspect_ratio: AspectRatio::new(4, 3).unwrap(),
+        });
+        let profiled = Path::new(r"C:\Games\Example.exe");
+        let default = Some((None, AspectRatio::new(16, 9).unwrap()));
+
+        assert_eq!(
+            settings.active_profile(true, true, Some(profiled)),
+            Some((
+                Some(profiled.to_path_buf()),
+                AspectRatio::new(4, 3).unwrap()
+            ))
+        );
+        assert_eq!(
+            settings.active_profile(true, true, Some(Path::new(r"C:\Other.exe"))),
+            default
+        );
+        assert_eq!(
+            settings.active_profile(true, false, Some(profiled)),
+            default
+        );
+        assert_eq!(settings.active_profile(true, true, None), default);
+        assert_eq!(settings.active_profile(false, true, Some(profiled)), None);
+    }
+
+    #[test]
+    fn flags_round_trip_and_default_to_off() {
+        let defaults = AppSettings::parse("@global|21:9\n").unwrap();
+        assert!(!defaults.always_on);
+        assert!(!defaults.show_in_screenshots);
+        let always_on = AppSettings::parse("@always_on|1\n").unwrap();
+        assert!(always_on.always_on && !always_on.show_in_screenshots);
+        let capturable = AppSettings::parse("@show_in_screenshots|1\n").unwrap();
+        assert!(capturable.show_in_screenshots && !capturable.always_on);
+        assert!(!AppSettings::parse("@always_on|0\n").unwrap().always_on);
+        assert!(AppSettings::parse("@always_on|yes\n").is_err());
+        assert!(AppSettings::parse("@show_in_screenshots|\n").is_err());
+
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "nijimi-settings-always-on-{}-{unique}.ini",
+            std::process::id()
+        ));
+        for (always_on, show_in_screenshots) in [(true, false), (false, true), (true, true)] {
+            let settings = AppSettings {
+                always_on,
+                show_in_screenshots,
+                ..AppSettings::default()
+            };
+            settings.save(&path).unwrap();
+            assert_eq!(AppSettings::load(&path).unwrap(), settings);
+        }
+
+        AppSettings::default().save(&path).unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), "@global|21:9\n");
+        fs::remove_file(path).unwrap();
     }
 }
