@@ -7,15 +7,117 @@ use crate::geometry::AspectRatio;
 const CONFIG_FILE_NAME: &str = "nijimi.ini";
 const APP_DIR_NAME: &str = "nijimi";
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BlurResolution {
+    Half,
+    Quarter,
+    Eighth,
+}
+
+impl BlurResolution {
+    pub const ALL: [Self; 3] = [Self::Half, Self::Quarter, Self::Eighth];
+
+    pub fn scale(self) -> u32 {
+        match self {
+            Self::Half => 2,
+            Self::Quarter => 4,
+            Self::Eighth => 8,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Half => "Half",
+            Self::Quarter => "Quarter",
+            Self::Eighth => "Eighth",
+        }
+    }
+
+    fn key(self) -> &'static str {
+        match self {
+            Self::Half => "half",
+            Self::Quarter => "quarter",
+            Self::Eighth => "eighth",
+        }
+    }
+
+    fn from_key(key: &str) -> Option<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|resolution| resolution.key() == key)
+    }
+}
+
+/// How the ambient fill looks. Strengths are percentages from 0 to 100.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct EffectSettings {
+    pub edge_softness: u8,
+    pub edge_blend: u8,
+    pub blur: u8,
+    pub resolution: BlurResolution,
+}
+
+impl Default for EffectSettings {
+    fn default() -> Self {
+        Self {
+            edge_softness: 50,
+            edge_blend: 60,
+            blur: 80,
+            resolution: BlurResolution::Quarter,
+        }
+    }
+}
+
+impl EffectSettings {
+    pub const MAX_STRENGTH: u8 = 100;
+
+    /// Parses `softness=10,blend=20,blur=25,resolution=quarter`. Missing keys keep their defaults.
+    fn parse(value: &str) -> Option<Self> {
+        let mut effect = Self::default();
+        for pair in value.split(',') {
+            let (key, value) = pair.split_once('=')?;
+            let value = value.trim();
+            match key.trim() {
+                "softness" => effect.edge_softness = parse_strength(value)?,
+                "blend" => effect.edge_blend = parse_strength(value)?,
+                "blur" => effect.blur = parse_strength(value)?,
+                "resolution" => effect.resolution = BlurResolution::from_key(value)?,
+                _ => return None,
+            }
+        }
+        Some(effect)
+    }
+
+    fn serialize(&self) -> String {
+        format!(
+            "softness={},blend={},blur={},resolution={}",
+            self.edge_softness,
+            self.edge_blend,
+            self.blur,
+            self.resolution.key()
+        )
+    }
+}
+
+fn parse_strength(value: &str) -> Option<u8> {
+    value
+        .parse()
+        .ok()
+        .filter(|strength| *strength <= EffectSettings::MAX_STRENGTH)
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AppProfile {
     pub executable: PathBuf,
     pub aspect_ratio: AspectRatio,
+    /// `None` follows the global effect settings.
+    pub effect: Option<EffectSettings>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AppSettings {
     pub default_aspect_ratio: AspectRatio,
+    pub default_effect: EffectSettings,
     pub always_on: bool,
     pub show_in_screenshots: bool,
     pub profiles: Vec<AppProfile>,
@@ -25,11 +127,20 @@ impl Default for AppSettings {
     fn default() -> Self {
         Self {
             default_aspect_ratio: AspectRatio::new(21, 9).unwrap(),
+            default_effect: EffectSettings::default(),
             always_on: false,
             show_in_screenshots: false,
             profiles: Vec::new(),
         }
     }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ActiveProfile {
+    /// `None` when shown only because of "Always on".
+    pub executable: Option<PathBuf>,
+    pub aspect_ratio: AspectRatio,
+    pub effect: EffectSettings,
 }
 
 impl AspectRatio {
@@ -64,6 +175,11 @@ impl AppSettings {
                     AspectRatio::parse(executable).ok_or_else(|| invalid_line(line_number))?;
                 continue;
             }
+            if ratio == "@effect" {
+                settings.default_effect =
+                    EffectSettings::parse(executable).ok_or_else(|| invalid_line(line_number))?;
+                continue;
+            }
             let flag = match ratio {
                 "@always_on" => Some(&mut settings.always_on),
                 "@show_in_screenshots" => Some(&mut settings.show_in_screenshots),
@@ -77,6 +193,13 @@ impl AppSettings {
                 };
                 continue;
             }
+            let (ratio, effect) = match ratio.split_once(',') {
+                Some((ratio, effect)) => (
+                    ratio,
+                    Some(EffectSettings::parse(effect).ok_or_else(|| invalid_line(line_number))?),
+                ),
+                None => (ratio, None),
+            };
             let aspect_ratio =
                 AspectRatio::parse(ratio).ok_or_else(|| invalid_line(line_number))?;
             let executable = executable.trim();
@@ -86,6 +209,7 @@ impl AppSettings {
             settings.upsert(AppProfile {
                 executable: PathBuf::from(executable),
                 aspect_ratio,
+                effect,
             });
         }
         Ok(settings)
@@ -97,7 +221,10 @@ impl AppSettings {
             "@global|{}:{}\n",
             self.default_aspect_ratio.width, self.default_aspect_ratio.height
         ));
-        // Omitted when off so older builds, which reject unknown lines, can still load the file.
+        // Omitted when unchanged so older builds, which reject unknown lines, can still load the file.
+        if self.default_effect != EffectSettings::default() {
+            contents.push_str(&format!("@effect|{}\n", self.default_effect.serialize()));
+        }
         if self.always_on {
             contents.push_str("@always_on|1\n");
         }
@@ -117,9 +244,13 @@ impl AppSettings {
                     "executable path contains a reserved settings character",
                 ));
             }
+            let effect = profile
+                .effect
+                .map(|effect| format!(",{}", effect.serialize()))
+                .unwrap_or_default();
             contents.push_str(&format!(
-                "{}:{}|{}\n",
-                profile.aspect_ratio.width, profile.aspect_ratio.height, executable
+                "{}:{}{effect}|{executable}\n",
+                profile.aspect_ratio.width, profile.aspect_ratio.height
             ));
         }
 
@@ -151,10 +282,14 @@ impl AppSettings {
         self.profiles.len() != old_len
     }
 
-    pub fn ratio_for(&self, executable: &Path) -> Option<AspectRatio> {
+    pub fn profile_for(&self, executable: &Path) -> Option<&AppProfile> {
         self.profiles
             .iter()
             .find(|profile| paths_match(&profile.executable, executable))
+    }
+
+    pub fn ratio_for(&self, executable: &Path) -> Option<AspectRatio> {
+        self.profile_for(executable)
             .map(|profile| profile.aspect_ratio)
     }
 
@@ -163,18 +298,25 @@ impl AppSettings {
         enabled: bool,
         on_primary_display: bool,
         foreground: Option<&Path>,
-    ) -> Option<(Option<PathBuf>, AspectRatio)> {
+    ) -> Option<ActiveProfile> {
         if !enabled {
             return None;
         }
         let profile = foreground
             .filter(|_| on_primary_display)
             .and_then(|executable| {
-                self.ratio_for(executable)
-                    .map(|ratio| (Some(executable.to_path_buf()), ratio))
+                self.profile_for(executable).map(|profile| ActiveProfile {
+                    executable: Some(executable.to_path_buf()),
+                    aspect_ratio: profile.aspect_ratio,
+                    effect: profile.effect.unwrap_or(self.default_effect),
+                })
             });
         if profile.is_none() && self.always_on {
-            return Some((None, self.default_aspect_ratio));
+            return Some(ActiveProfile {
+                executable: None,
+                aspect_ratio: self.default_aspect_ratio,
+                effect: self.default_effect,
+            });
         }
         profile
     }
@@ -438,11 +580,13 @@ mod tests {
         settings.upsert(AppProfile {
             executable: PathBuf::from(r"C:\Games\Example.exe"),
             aspect_ratio: AspectRatio::new(16, 9).unwrap(),
+            effect: None,
         });
         settings.default_aspect_ratio = AspectRatio::new(21, 9).unwrap();
         settings.upsert(AppProfile {
             executable: PathBuf::from(r"c:\games\example.EXE"),
             aspect_ratio: AspectRatio::new(16, 9).unwrap(),
+            effect: None,
         });
 
         settings.save(&path).unwrap();
@@ -459,6 +603,7 @@ mod tests {
         loaded.upsert(AppProfile {
             executable: PathBuf::from(r"C:\Games\Example.exe"),
             aspect_ratio: AspectRatio::new(32, 9).unwrap(),
+            effect: None,
         });
         loaded.save(&path).unwrap();
         loaded = AppSettings::load(&path).unwrap();
@@ -525,6 +670,7 @@ mod tests {
         let profiles = vec![AppProfile {
             executable: PathBuf::from(r"C:\Games\Shared.exe"),
             aspect_ratio: AspectRatio::new(16, 9).unwrap(),
+            effect: None,
         }];
         let choices = add_app_choices(
             &recent,
@@ -566,14 +712,16 @@ mod tests {
         settings.upsert(AppProfile {
             executable: PathBuf::from(r"C:\Games\Example.exe"),
             aspect_ratio: AspectRatio::new(21, 9).unwrap(),
+            effect: None,
         });
         let matching = Path::new(r"c:\games\EXAMPLE.EXE");
         assert_eq!(
             settings.active_profile(true, true, Some(matching)),
-            Some((
-                Some(matching.to_path_buf()),
-                AspectRatio::new(21, 9).unwrap()
-            ))
+            Some(ActiveProfile {
+                executable: Some(matching.to_path_buf()),
+                aspect_ratio: AspectRatio::new(21, 9).unwrap(),
+                effect: EffectSettings::default(),
+            })
         );
         assert_eq!(settings.active_profile(false, true, Some(matching)), None);
         assert_eq!(settings.active_profile(true, false, Some(matching)), None);
@@ -594,16 +742,22 @@ mod tests {
         settings.upsert(AppProfile {
             executable: PathBuf::from(r"C:\Games\Example.exe"),
             aspect_ratio: AspectRatio::new(4, 3).unwrap(),
+            effect: None,
         });
         let profiled = Path::new(r"C:\Games\Example.exe");
-        let default = Some((None, AspectRatio::new(16, 9).unwrap()));
+        let default = Some(ActiveProfile {
+            executable: None,
+            aspect_ratio: AspectRatio::new(16, 9).unwrap(),
+            effect: EffectSettings::default(),
+        });
 
         assert_eq!(
             settings.active_profile(true, true, Some(profiled)),
-            Some((
-                Some(profiled.to_path_buf()),
-                AspectRatio::new(4, 3).unwrap()
-            ))
+            Some(ActiveProfile {
+                executable: Some(profiled.to_path_buf()),
+                aspect_ratio: AspectRatio::new(4, 3).unwrap(),
+                effect: EffectSettings::default(),
+            })
         );
         assert_eq!(
             settings.active_profile(true, true, Some(Path::new(r"C:\Other.exe"))),
@@ -651,5 +805,78 @@ mod tests {
         AppSettings::default().save(&path).unwrap();
         assert_eq!(fs::read_to_string(&path).unwrap(), "@global|21:9\n");
         fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn effect_settings_round_trip_globally_and_per_profile() {
+        let custom = EffectSettings {
+            edge_softness: 20,
+            edge_blend: 40,
+            blur: 70,
+            resolution: BlurResolution::Eighth,
+        };
+        let mut settings = AppSettings {
+            default_effect: EffectSettings {
+                edge_blend: 15,
+                ..EffectSettings::default()
+            },
+            ..AppSettings::default()
+        };
+        settings.upsert(AppProfile {
+            executable: PathBuf::from(r"C:\Games\Custom.exe"),
+            aspect_ratio: AspectRatio::new(16, 9).unwrap(),
+            effect: Some(custom),
+        });
+        settings.upsert(AppProfile {
+            executable: PathBuf::from(r"C:\Games\Global.exe"),
+            aspect_ratio: AspectRatio::new(4, 3).unwrap(),
+            effect: None,
+        });
+
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "nijimi-settings-effect-{}-{unique}.ini",
+            std::process::id()
+        ));
+        settings.save(&path).unwrap();
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            "@global|21:9\n\
+             @effect|softness=50,blend=15,blur=80,resolution=quarter\n\
+             16:9,softness=20,blend=40,blur=70,resolution=eighth|C:\\Games\\Custom.exe\n\
+             4:3|C:\\Games\\Global.exe\n"
+        );
+        let loaded = AppSettings::load(&path).unwrap();
+        fs::remove_file(path).unwrap();
+        assert_eq!(loaded, settings);
+
+        let custom_profile = loaded
+            .active_profile(true, true, Some(Path::new(r"C:\Games\Custom.exe")))
+            .unwrap();
+        assert_eq!(custom_profile.effect, custom);
+        let global_profile = loaded
+            .active_profile(true, true, Some(Path::new(r"C:\Games\Global.exe")))
+            .unwrap();
+        assert_eq!(global_profile.effect, loaded.default_effect);
+    }
+
+    #[test]
+    fn partial_effect_lines_keep_defaults_and_invalid_values_are_rejected() {
+        let loaded = AppSettings::parse("@effect|softness=30\n").unwrap();
+        assert_eq!(
+            loaded.default_effect,
+            EffectSettings {
+                edge_softness: 30,
+                ..EffectSettings::default()
+            }
+        );
+        assert!(AppSettings::parse("@effect|blend=101\n").is_err());
+        assert!(AppSettings::parse("@effect|softness=101\n").is_err());
+        assert!(AppSettings::parse("@effect|resolution=full\n").is_err());
+        assert!(AppSettings::parse("@effect|glow=3\n").is_err());
+        assert!(AppSettings::parse("16:9,blur=x|C:\\Game.exe\n").is_err());
     }
 }

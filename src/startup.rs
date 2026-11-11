@@ -16,6 +16,8 @@ const RUN_KEY: PCWSTR = w!(r"Software\Microsoft\Windows\CurrentVersion\Run");
 const STARTUP_APPROVED_KEY: PCWSTR =
     w!(r"Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run");
 const VALUE_NAME: PCWSTR = w!("nijimi");
+/// Passed by the startup entry so signing in starts nijimi in the tray without opening Settings.
+pub const BACKGROUND_ARGUMENT: &str = "--background";
 
 /// True if Windows will launch *this* executable at sign-in. An entry left behind by a copy
 /// that has since been moved counts as off, so turning the toggle on repairs the path.
@@ -52,12 +54,29 @@ pub fn set_enabled(enabled: bool) -> Result<()> {
     }
 }
 
+/// Rewrites an enabled entry whose command is out of date, such as one saved by a version that
+/// didn't pass [`BACKGROUND_ARGUMENT`].
+pub fn refresh() -> Result<()> {
+    let executable = std::env::current_exe()?;
+    if is_enabled() && read_string(RUN_KEY, VALUE_NAME) != Some(command_for(&executable)) {
+        set_enabled(true)?;
+    }
+    Ok(())
+}
+
 fn command_for(executable: &Path) -> String {
-    format!("\"{}\"", executable.display())
+    format!("\"{}\" {BACKGROUND_ARGUMENT}", executable.display())
 }
 
 fn command_matches(command: &str, executable: &Path) -> bool {
-    let registered = command.trim().trim_matches('"');
+    let command = command.trim();
+    let registered = match command
+        .strip_prefix('"')
+        .and_then(|rest| rest.split_once('"'))
+    {
+        Some((path, _)) => path,
+        None => command,
+    };
     registered.eq_ignore_ascii_case(&executable.to_string_lossy())
 }
 
@@ -134,12 +153,15 @@ mod tests {
     fn startup_command_quotes_the_path_and_matches_it_back() {
         let executable = Path::new(r"C:\Program Files\nijimi\nijimi.exe");
         let command = command_for(executable);
-        assert_eq!(command, r#""C:\Program Files\nijimi\nijimi.exe""#);
+        assert_eq!(
+            command,
+            r#""C:\Program Files\nijimi\nijimi.exe" --background"#
+        );
         assert!(command_matches(&command, executable));
-        assert!(command_matches(
-            r#""c:\program files\NIJIMI\nijimi.exe""#,
-            executable
-        ));
+        assert!(
+            command_matches(r#""c:\program files\NIJIMI\nijimi.exe""#, executable),
+            "entries from before --background still count, so they can be refreshed"
+        );
         assert!(!command_matches(r#""D:\Old\nijimi.exe""#, executable));
     }
 }

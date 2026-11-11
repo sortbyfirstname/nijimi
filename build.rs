@@ -21,7 +21,7 @@ mod shaders {
     use windows::core::PCSTR;
 
     const SOURCE_PATH: &str = "src/ambient.hlsl";
-    const ENTRIES: [(&str, &str); 8] = [
+    const ENTRIES: [(&str, &str); 10] = [
         ("VSMain", "vs_4_0"),
         ("PSPrepare", "ps_4_0"),
         ("PSBlurHorizontal", "ps_4_0"),
@@ -30,6 +30,8 @@ mod shaders {
         ("PSBlurWideVertical", "ps_4_0"),
         ("PSBlur", "ps_4_0"),
         ("PSComposite", "ps_4_0"),
+        ("PSPreviewScreen", "ps_4_0"),
+        ("PSPreviewFinal", "ps_4_0"),
     ];
 
     pub fn compile_all() {

@@ -4,23 +4,25 @@ use std::time::{Duration, Instant};
 
 use windows::Win32::Foundation::{BOOL, COLORREF, E_ACCESSDENIED, HWND, RECT};
 use windows::Win32::Graphics::Direct3D::{
-    D3D_DRIVER_TYPE_UNKNOWN, D3D_FEATURE_LEVEL_10_0, D3D_FEATURE_LEVEL_10_1,
+    D3D_DRIVER_TYPE, D3D_DRIVER_TYPE_UNKNOWN, D3D_FEATURE_LEVEL_10_0, D3D_FEATURE_LEVEL_10_1,
     D3D_FEATURE_LEVEL_11_0, D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST,
 };
 use windows::Win32::Graphics::Direct3D11::{
     D3D11_BIND_CONSTANT_BUFFER, D3D11_BIND_RENDER_TARGET, D3D11_BIND_SHADER_RESOURCE,
     D3D11_BUFFER_DESC, D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_FILTER_MIN_MAG_MIP_LINEAR,
-    D3D11_RASTERIZER_DESC, D3D11_SAMPLER_DESC, D3D11_SDK_VERSION, D3D11_SUBRESOURCE_DATA,
-    D3D11_TEXTURE_ADDRESS_CLAMP, D3D11_TEXTURE2D_DESC, D3D11_USAGE_DEFAULT, D3D11_VIEWPORT,
-    D3D11CreateDevice, ID3D11Buffer, ID3D11ClassLinkage, ID3D11DepthStencilView, ID3D11Device,
-    ID3D11DeviceContext, ID3D11PixelShader, ID3D11RasterizerState, ID3D11RenderTargetView,
-    ID3D11SamplerState, ID3D11ShaderResourceView, ID3D11Texture2D, ID3D11VertexShader,
+    D3D11_RASTERIZER_DESC, D3D11_RESOURCE_MISC_GENERATE_MIPS, D3D11_SAMPLER_DESC,
+    D3D11_SDK_VERSION, D3D11_SUBRESOURCE_DATA, D3D11_TEXTURE_ADDRESS_CLAMP, D3D11_TEXTURE2D_DESC,
+    D3D11_USAGE_DEFAULT, D3D11_VIEWPORT, D3D11CreateDevice, ID3D11Buffer, ID3D11ClassLinkage,
+    ID3D11DepthStencilView, ID3D11Device, ID3D11DeviceContext, ID3D11PixelShader,
+    ID3D11RasterizerState, ID3D11RenderTargetView, ID3D11SamplerState, ID3D11ShaderResourceView,
+    ID3D11Texture2D, ID3D11VertexShader,
 };
 use windows::Win32::Graphics::DirectComposition::{
     DCompositionCreateDevice, IDCompositionDevice, IDCompositionTarget,
 };
 use windows::Win32::Graphics::Dxgi::Common::{
-    DXGI_ALPHA_MODE_PREMULTIPLIED, DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_SAMPLE_DESC,
+    DXGI_ALPHA_MODE_PREMULTIPLIED, DXGI_FORMAT, DXGI_FORMAT_B8G8R8A8_UNORM,
+    DXGI_FORMAT_R10G10B10A2_UNORM, DXGI_FORMAT_R16G16B16A16_FLOAT, DXGI_SAMPLE_DESC,
 };
 use windows::Win32::Graphics::Dxgi::{
     CreateDXGIFactory1, DXGI_ERROR_NOT_CURRENTLY_AVAILABLE, DXGI_ERROR_SESSION_DISCONNECTED,
@@ -31,17 +33,30 @@ use windows::Win32::Graphics::Dxgi::{
 use windows::Win32::Graphics::Gdi::{MONITOR_DEFAULTTOPRIMARY, MonitorFromPoint};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, LWA_ALPHA, RegisterClassW, SW_HIDE, SW_SHOWNOACTIVATE,
-    SWP_NOACTIVATE, SetLayeredWindowAttributes, SetWindowDisplayAffinity, SetWindowPos, ShowWindow,
+    CreateWindowExW, DefWindowProcW, GW_HWNDPREV, GetForegroundWindow, GetWindow, HWND_TOPMOST,
+    LWA_ALPHA, RegisterClassW, SW_HIDE, SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
+    SetLayeredWindowAttributes, SetWindowDisplayAffinity, SetWindowPos, ShowWindow,
     WDA_EXCLUDEFROMCAPTURE, WDA_NONE, WINDOW_DISPLAY_AFFINITY, WINDOW_EX_STYLE, WINDOW_STYLE,
     WNDCLASSW,
 };
 use windows::core::{Error, HRESULT, Interface, Result, w};
 
-use crate::geometry::{AspectRatio, ScreenRect, ambient_regions, content_bounds, fit_content};
+use crate::geometry::{
+    AspectRatio, ScreenRect, ambient_regions, content_bounds, fit_content, inset_bar_edges,
+};
+use crate::settings::EffectSettings;
 
 const WINDOW_CLASS: windows::core::PCWSTR = w!("NijimiOverlayWindow");
-const BLUR_SCALE: u32 = 4;
+/// Blur and edge blend at 100%, as fractions of the screen's shorter side.
+const MAX_BLUR_SIGMA: f32 = 0.04;
+const MAX_EDGE_BLEND: f32 = 0.1;
+/// How much of the picture's outermost edge edge softness covers at 100%.
+const MAX_EDGE_SOFTNESS: f32 = 0.01;
+/// Edge blend always covers at least this much of the picture's edge. Video and games often have
+/// a fringe there that would otherwise be mirrored into the bar as a thin line.
+const MIN_BLEND_INSET: f32 = 2.0;
+/// Caps the per-pass Gaussian taps (in blur texels), which bounds GPU cost at half resolution.
+const MAX_BLUR_RADIUS: f32 = 128.0;
 const CAPTURE_RETRY_INITIAL: Duration = Duration::from_millis(250);
 const CAPTURE_RETRY_MAX: Duration = Duration::from_secs(4);
 const INITIAL_FRAME_TIMEOUT_MS: u32 = 100;
@@ -56,6 +71,7 @@ pub struct Renderer {
     height: u32,
     enabled: bool,
     aspect_ratio: AspectRatio,
+    effect: EffectSettings,
     capturable: bool,
     scene: SceneGeometry,
     gpu: Option<Gpu>,
@@ -76,31 +92,11 @@ struct Gpu {
     _composition: IDCompositionDevice,
     render_target: ID3D11RenderTargetView,
     scene_buffer: ID3D11Buffer,
-    blur_render_target: ID3D11RenderTargetView,
-    blur_view: ID3D11ShaderResourceView,
-    prefilter_render_target: ID3D11RenderTargetView,
-    prefilter_view: ID3D11ShaderResourceView,
-    horizontal_render_target: ID3D11RenderTargetView,
-    horizontal_view: ID3D11ShaderResourceView,
-    wide_horizontal_render_target: ID3D11RenderTargetView,
-    wide_horizontal_view: ID3D11ShaderResourceView,
-    wide_blur_render_target: ID3D11RenderTargetView,
-    wide_blur_view: ID3D11ShaderResourceView,
-    blur_width: u32,
-    blur_height: u32,
+    blur: BlurTargets,
     captured_texture: ID3D11Texture2D,
     captured_view: ID3D11ShaderResourceView,
     has_captured_frame: bool,
-    vertex_shader: ID3D11VertexShader,
-    prepare_pixel_shader: ID3D11PixelShader,
-    horizontal_pixel_shader: ID3D11PixelShader,
-    vertical_pixel_shader: ID3D11PixelShader,
-    wide_horizontal_pixel_shader: ID3D11PixelShader,
-    wide_vertical_pixel_shader: ID3D11PixelShader,
-    blur_pixel_shader: ID3D11PixelShader,
-    composite_pixel_shader: ID3D11PixelShader,
-    sampler: ID3D11SamplerState,
-    rasterizer: ID3D11RasterizerState,
+    shaders: AmbientShaders,
 }
 
 struct OverlayWindow(HWND);
@@ -109,28 +105,90 @@ struct OverlayWindow(HWND);
 #[derive(Clone, Copy)]
 struct SceneConstants {
     content_rect: [f32; 4],
+    sample_rect: [f32; 4],
+    blur_sigma: f32,
+    blur_radius: f32,
+    edge_blend: f32,
+    downsample: f32,
+    edge_inset: f32,
+    _padding: [f32; 3],
 }
 
 impl Default for SceneConstants {
     fn default() -> Self {
         Self {
             content_rect: [0.0, 0.0, 1.0, 1.0],
+            sample_rect: [0.0, 0.0, 1.0, 1.0],
+            blur_sigma: 0.0,
+            blur_radius: 0.0,
+            edge_blend: 0.0,
+            downsample: 4.0,
+            edge_inset: 0.0,
+            _padding: [0.0; 3],
         }
     }
 }
 
 struct SceneGeometry {
-    rect: ScreenRect,
+    /// The part of the content that is sampled and never drawn over: the content minus the
+    /// edge the edge blend covers.
+    clear_rect: ScreenRect,
+    blur_scale: u32,
     constants: SceneConstants,
 }
+
 impl SceneGeometry {
-    fn new(width: u32, height: u32, aspect_ratio: AspectRatio) -> Option<Self> {
+    fn new(
+        width: u32,
+        height: u32,
+        aspect_ratio: AspectRatio,
+        effect: EffectSettings,
+    ) -> Option<Self> {
+        Self::with_blur_scale(
+            width,
+            height,
+            aspect_ratio,
+            effect,
+            effect.resolution.scale(),
+        )
+    }
+
+    fn with_blur_scale(
+        width: u32,
+        height: u32,
+        aspect_ratio: AspectRatio,
+        effect: EffectSettings,
+        blur_scale: u32,
+    ) -> Option<Self> {
         let rect = fit_content(width, height, aspect_ratio)?;
+        let shorter_side = width.min(height) as f32;
+        let strength = |value: u8| value as f32 / EffectSettings::MAX_STRENGTH as f32;
+        let mut edge_inset =
+            (strength(effect.edge_softness) * MAX_EDGE_SOFTNESS * shorter_side).round();
+        if effect.edge_blend > 0 {
+            edge_inset = edge_inset.max(MIN_BLEND_INSET);
+        }
+        let edge_inset = edge_inset as u32;
+        let clear_rect = inset_bar_edges(rect, width, height, edge_inset);
+        let edge_inset = (clear_rect.left - rect.left)
+            .max(clear_rect.top - rect.top)
+            .max(rect.right - clear_rect.right)
+            .max(rect.bottom - clear_rect.bottom);
         let bounds = content_bounds(rect, width, height)?;
+        let sample = content_bounds(clear_rect, width, height)?;
+        let blur_sigma = strength(effect.blur) * MAX_BLUR_SIGMA * shorter_side / blur_scale as f32;
         Some(Self {
-            rect,
+            clear_rect,
+            blur_scale,
             constants: SceneConstants {
                 content_rect: [bounds.left, bounds.top, bounds.right, bounds.bottom],
+                sample_rect: [sample.left, sample.top, sample.right, sample.bottom],
+                blur_sigma,
+                blur_radius: (blur_sigma * 3.0).ceil().min(MAX_BLUR_RADIUS),
+                edge_blend: (strength(effect.edge_blend) * MAX_EDGE_BLEND * shorter_side).round(),
+                downsample: blur_scale as f32,
+                edge_inset: edge_inset as f32,
+                _padding: [0.0; 3],
             },
         })
     }
@@ -175,10 +233,71 @@ fn capture_timeout_ms(has_captured_frame: bool) -> u32 {
     }
 }
 
-unsafe fn create_blur_target(
-    device: &ID3D11Device,
-    desc: &D3D11_TEXTURE2D_DESC,
-) -> Result<(ID3D11RenderTargetView, ID3D11ShaderResourceView)> {
+struct BlurTarget {
+    render_target: ID3D11RenderTargetView,
+    view: ID3D11ShaderResourceView,
+}
+
+/// The downsampled textures the blur passes run through. Their size follows the blur resolution.
+struct BlurTargets {
+    scale: u32,
+    width: u32,
+    height: u32,
+    prefilter: BlurTarget,
+    horizontal: BlurTarget,
+    narrow: BlurTarget,
+    wide_horizontal: BlurTarget,
+    wide: BlurTarget,
+    ambient: BlurTarget,
+}
+
+impl BlurTargets {
+    fn new(device: &ID3D11Device, width: u32, height: u32, scale: u32) -> Result<Self> {
+        let blur_width = width.div_ceil(scale);
+        let blur_height = height.div_ceil(scale);
+        let target_with_mips = |format: DXGI_FORMAT, mipped: bool| {
+            create_blur_target(
+                device,
+                &D3D11_TEXTURE2D_DESC {
+                    Width: blur_width,
+                    Height: blur_height,
+                    MipLevels: if mipped { 0 } else { 1 },
+                    ArraySize: 1,
+                    Format: format,
+                    SampleDesc: DXGI_SAMPLE_DESC {
+                        Count: 1,
+                        Quality: 0,
+                    },
+                    Usage: D3D11_USAGE_DEFAULT,
+                    BindFlags: D3D11_BIND_RENDER_TARGET.0 as u32
+                        | D3D11_BIND_SHADER_RESOURCE.0 as u32,
+                    CPUAccessFlags: 0,
+                    MiscFlags: if mipped {
+                        D3D11_RESOURCE_MISC_GENERATE_MIPS.0 as u32
+                    } else {
+                        0
+                    },
+                },
+            )
+        };
+        let target = |format: DXGI_FORMAT| target_with_mips(format, false);
+        // 10-bit intermediates and a half-float result keep wide, smooth gradients from banding.
+        Ok(Self {
+            scale,
+            width: blur_width,
+            height: blur_height,
+            // Its mip chain gives the edge blend a blur whose radius can vary per pixel.
+            prefilter: target_with_mips(DXGI_FORMAT_R10G10B10A2_UNORM, true)?,
+            horizontal: target(DXGI_FORMAT_R10G10B10A2_UNORM)?,
+            narrow: target(DXGI_FORMAT_R10G10B10A2_UNORM)?,
+            wide_horizontal: target(DXGI_FORMAT_R10G10B10A2_UNORM)?,
+            wide: target(DXGI_FORMAT_R10G10B10A2_UNORM)?,
+            ambient: target(DXGI_FORMAT_R16G16B16A16_FLOAT)?,
+        })
+    }
+}
+
+fn create_blur_target(device: &ID3D11Device, desc: &D3D11_TEXTURE2D_DESC) -> Result<BlurTarget> {
     unsafe {
         let mut texture = None;
         device.CreateTexture2D(desc, None, Some(&mut texture))?;
@@ -189,7 +308,10 @@ unsafe fn create_blur_target(
         let mut view = None;
         device.CreateShaderResourceView(&texture, None, Some(&mut view))?;
         let view = view.ok_or_else(Error::from_win32)?;
-        Ok((render_target, view))
+        Ok(BlurTarget {
+            render_target,
+            view,
+        })
     }
 }
 
@@ -198,31 +320,120 @@ struct AmbientPass<'a> {
     render_target: &'a ID3D11RenderTargetView,
     scene_buffer: &'a ID3D11Buffer,
     scene: &'a SceneGeometry,
-    blur_render_target: &'a ID3D11RenderTargetView,
-    blur_view: &'a ID3D11ShaderResourceView,
-    prefilter_render_target: &'a ID3D11RenderTargetView,
-    prefilter_view: &'a ID3D11ShaderResourceView,
-    horizontal_render_target: &'a ID3D11RenderTargetView,
-    horizontal_view: &'a ID3D11ShaderResourceView,
-    wide_horizontal_render_target: &'a ID3D11RenderTargetView,
-    wide_horizontal_view: &'a ID3D11ShaderResourceView,
-    wide_blur_render_target: &'a ID3D11RenderTargetView,
-    wide_blur_view: &'a ID3D11ShaderResourceView,
+    blur: &'a BlurTargets,
     source: &'a ID3D11ShaderResourceView,
-    vertex_shader: &'a ID3D11VertexShader,
-    prepare_pixel_shader: &'a ID3D11PixelShader,
-    horizontal_pixel_shader: &'a ID3D11PixelShader,
-    vertical_pixel_shader: &'a ID3D11PixelShader,
-    wide_horizontal_pixel_shader: &'a ID3D11PixelShader,
-    wide_vertical_pixel_shader: &'a ID3D11PixelShader,
-    blur_pixel_shader: &'a ID3D11PixelShader,
-    composite_pixel_shader: &'a ID3D11PixelShader,
-    sampler: &'a ID3D11SamplerState,
-    rasterizer: &'a ID3D11RasterizerState,
+    shaders: &'a AmbientShaders,
     width: u32,
     height: u32,
-    blur_width: u32,
-    blur_height: u32,
+}
+
+struct AmbientShaders {
+    vertex: ID3D11VertexShader,
+    prepare: ID3D11PixelShader,
+    horizontal: ID3D11PixelShader,
+    vertical: ID3D11PixelShader,
+    wide_horizontal: ID3D11PixelShader,
+    wide_vertical: ID3D11PixelShader,
+    blur: ID3D11PixelShader,
+    composite: ID3D11PixelShader,
+    sampler: ID3D11SamplerState,
+    rasterizer: ID3D11RasterizerState,
+}
+
+impl AmbientShaders {
+    fn new(device: &ID3D11Device) -> Result<Self> {
+        unsafe {
+            let sampler_desc = D3D11_SAMPLER_DESC {
+                Filter: D3D11_FILTER_MIN_MAG_MIP_LINEAR,
+                AddressU: D3D11_TEXTURE_ADDRESS_CLAMP,
+                AddressV: D3D11_TEXTURE_ADDRESS_CLAMP,
+                AddressW: D3D11_TEXTURE_ADDRESS_CLAMP,
+                MipLODBias: 0.0,
+                MaxAnisotropy: 1,
+                ComparisonFunc: windows::Win32::Graphics::Direct3D11::D3D11_COMPARISON_NEVER,
+                BorderColor: [0.0; 4],
+                MinLOD: 0.0,
+                MaxLOD: f32::MAX,
+            };
+            let mut sampler = None;
+            device.CreateSamplerState(&sampler_desc, Some(&mut sampler))?;
+            let rasterizer_desc = D3D11_RASTERIZER_DESC {
+                FillMode: windows::Win32::Graphics::Direct3D11::D3D11_FILL_SOLID,
+                CullMode: windows::Win32::Graphics::Direct3D11::D3D11_CULL_NONE,
+                FrontCounterClockwise: BOOL(0),
+                DepthBias: 0,
+                DepthBiasClamp: 0.0,
+                SlopeScaledDepthBias: 0.0,
+                DepthClipEnable: BOOL(1),
+                ScissorEnable: BOOL(1),
+                MultisampleEnable: BOOL(0),
+                AntialiasedLineEnable: BOOL(0),
+            };
+            let mut rasterizer = None;
+            device.CreateRasterizerState(&rasterizer_desc, Some(&mut rasterizer))?;
+            Ok(Self {
+                vertex: create_vertex_shader(device)?,
+                prepare: create_pixel_shader(device, PS_PREPARE)?,
+                horizontal: create_pixel_shader(device, PS_BLUR_HORIZONTAL)?,
+                vertical: create_pixel_shader(device, PS_BLUR_VERTICAL)?,
+                wide_horizontal: create_pixel_shader(device, PS_BLUR_WIDE_HORIZONTAL)?,
+                wide_vertical: create_pixel_shader(device, PS_BLUR_WIDE_VERTICAL)?,
+                blur: create_pixel_shader(device, PS_BLUR)?,
+                composite: create_pixel_shader(device, PS_COMPOSITE)?,
+                sampler: sampler.ok_or_else(Error::from_win32)?,
+                rasterizer: rasterizer.ok_or_else(Error::from_win32)?,
+            })
+        }
+    }
+}
+
+fn create_device(
+    adapter: Option<&IDXGIAdapter>,
+    driver_type: D3D_DRIVER_TYPE,
+) -> Result<(ID3D11Device, ID3D11DeviceContext)> {
+    let mut device = None;
+    let mut context = None;
+    unsafe {
+        D3D11CreateDevice(
+            adapter,
+            driver_type,
+            windows::Win32::Foundation::HMODULE::default(),
+            D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+            Some(&[
+                D3D_FEATURE_LEVEL_11_0,
+                D3D_FEATURE_LEVEL_10_1,
+                D3D_FEATURE_LEVEL_10_0,
+            ]),
+            D3D11_SDK_VERSION,
+            Some(&mut device),
+            None,
+            Some(&mut context),
+        )?;
+    }
+    Ok((
+        device.ok_or_else(Error::from_win32)?,
+        context.ok_or_else(Error::from_win32)?,
+    ))
+}
+
+fn create_scene_buffer(device: &ID3D11Device) -> Result<ID3D11Buffer> {
+    let initial_scene = SceneConstants::default();
+    let scene_data = D3D11_SUBRESOURCE_DATA {
+        pSysMem: (&initial_scene as *const SceneConstants).cast(),
+        SysMemPitch: 0,
+        SysMemSlicePitch: 0,
+    };
+    let scene_desc = D3D11_BUFFER_DESC {
+        ByteWidth: size_of::<SceneConstants>() as u32,
+        Usage: D3D11_USAGE_DEFAULT,
+        BindFlags: D3D11_BIND_CONSTANT_BUFFER.0 as u32,
+        CPUAccessFlags: 0,
+        MiscFlags: 0,
+        StructureByteStride: 0,
+    };
+    let mut scene_buffer = None;
+    unsafe { device.CreateBuffer(&scene_desc, Some(&scene_data), Some(&mut scene_buffer))? };
+    scene_buffer.ok_or_else(Error::from_win32)
 }
 
 impl Drop for OverlayWindow {
@@ -235,10 +446,18 @@ impl Drop for OverlayWindow {
 
 impl Renderer {
     pub fn new() -> Result<Self> {
-        Self::with_options(AspectRatio::new(16, 9).unwrap(), false)
+        Self::with_options(
+            AspectRatio::new(16, 9).unwrap(),
+            EffectSettings::default(),
+            false,
+        )
     }
 
-    fn with_options(aspect_ratio: AspectRatio, capturable: bool) -> Result<Self> {
+    fn with_options(
+        aspect_ratio: AspectRatio,
+        effect: EffectSettings,
+        capturable: bool,
+    ) -> Result<Self> {
         unsafe {
             let width = windows::Win32::UI::WindowsAndMessaging::GetSystemMetrics(
                 windows::Win32::UI::WindowsAndMessaging::SM_CXSCREEN,
@@ -249,8 +468,8 @@ impl Renderer {
             if width == 0 || height == 0 {
                 return Err(Error::from_win32());
             }
-            let scene =
-                SceneGeometry::new(width, height, aspect_ratio).ok_or_else(Error::from_win32)?;
+            let scene = SceneGeometry::new(width, height, aspect_ratio, effect)
+                .ok_or_else(Error::from_win32)?;
 
             let instance = windows::Win32::Foundation::HINSTANCE(GetModuleHandleW(None)?.0);
             let class = WNDCLASSW {
@@ -304,6 +523,7 @@ impl Renderer {
                 height,
                 enabled: false,
                 aspect_ratio,
+                effect,
                 capturable,
                 scene,
                 gpu: None,
@@ -313,10 +533,11 @@ impl Renderer {
         }
     }
 
-    pub fn set_aspect_ratio(&mut self, aspect_ratio: AspectRatio) -> Result<()> {
-        self.scene = SceneGeometry::new(self.width, self.height, aspect_ratio)
+    pub fn configure(&mut self, aspect_ratio: AspectRatio, effect: EffectSettings) -> Result<()> {
+        self.scene = SceneGeometry::new(self.width, self.height, aspect_ratio, effect)
             .ok_or_else(Error::from_win32)?;
         self.aspect_ratio = aspect_ratio;
+        self.effect = effect;
         Ok(())
     }
 
@@ -332,7 +553,12 @@ impl Renderer {
     pub fn set_enabled(&mut self, enabled: bool) -> Result<()> {
         if enabled {
             if self.gpu.is_none() {
-                self.gpu = Some(Gpu::new(self.hwnd, self.width, self.height)?);
+                self.gpu = Some(Gpu::new(
+                    self.hwnd,
+                    self.width,
+                    self.height,
+                    self.scene.blur_scale,
+                )?);
             }
             let gpu = self.gpu.as_mut().unwrap();
             if gpu.duplication.is_none() {
@@ -387,7 +613,7 @@ impl Renderer {
 
     pub fn refresh(&mut self, enabled: bool) -> Result<()> {
         let _ = self.set_enabled(false);
-        let mut replacement = Self::with_options(self.aspect_ratio, self.capturable)?;
+        let mut replacement = Self::with_options(self.aspect_ratio, self.effect, self.capturable)?;
         replacement.set_enabled(enabled)?;
         *self = replacement;
         Ok(())
@@ -397,6 +623,7 @@ impl Renderer {
         if !self.enabled {
             return Ok(());
         }
+        self.stay_above_foreground();
         let width = unsafe {
             windows::Win32::UI::WindowsAndMessaging::GetSystemMetrics(
                 windows::Win32::UI::WindowsAndMessaging::SM_CXSCREEN,
@@ -414,7 +641,7 @@ impl Renderer {
             if !self.rebuild_retry.is_ready() {
                 return Ok(());
             }
-            match Gpu::new(self.hwnd, self.width, self.height) {
+            match Gpu::new(self.hwnd, self.width, self.height, self.scene.blur_scale) {
                 Ok(gpu) => self.gpu = Some(gpu),
                 Err(_) => {
                     self.rebuild_retry.schedule();
@@ -429,6 +656,38 @@ impl Renderer {
             self.rebuild_retry.reset();
         }
         Ok(())
+    }
+}
+
+impl Renderer {
+    /// An always-on-top game that re-activates, e.g. after the Win+Shift+S overlay closes, lands
+    /// above the overlay, often without a foreground event reaching us. Raise the overlay back
+    /// over the foreground window only, so other always-on-top tools aren't fought over.
+    fn stay_above_foreground(&self) {
+        unsafe {
+            let foreground = GetForegroundWindow();
+            if foreground.0.is_null() {
+                return;
+            }
+            let mut above = GetWindow(self.hwnd, GW_HWNDPREV);
+            while let Ok(window) = above
+                && !window.0.is_null()
+            {
+                if window == foreground {
+                    let _ = SetWindowPos(
+                        self.hwnd,
+                        HWND_TOPMOST,
+                        0,
+                        0,
+                        0,
+                        0,
+                        SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+                    );
+                    return;
+                }
+                above = GetWindow(window, GW_HWNDPREV);
+            }
+        }
     }
 }
 
@@ -449,31 +708,12 @@ enum Capture {
 }
 
 impl Gpu {
-    fn new(hwnd: HWND, width: u32, height: u32) -> Result<Self> {
+    fn new(hwnd: HWND, width: u32, height: u32, blur_scale: u32) -> Result<Self> {
         unsafe {
             let factory: IDXGIFactory2 = CreateDXGIFactory1()?;
             let (adapter, output) = find_primary_output(&factory)?;
             let d3d_adapter: IDXGIAdapter = adapter.cast()?;
-            let mut device = None;
-            let mut context = None;
-            let mut feature_level = D3D_FEATURE_LEVEL_11_0;
-            D3D11CreateDevice(
-                &d3d_adapter,
-                D3D_DRIVER_TYPE_UNKNOWN,
-                windows::Win32::Foundation::HMODULE::default(),
-                D3D11_CREATE_DEVICE_BGRA_SUPPORT,
-                Some(&[
-                    D3D_FEATURE_LEVEL_11_0,
-                    D3D_FEATURE_LEVEL_10_1,
-                    D3D_FEATURE_LEVEL_10_0,
-                ]),
-                D3D11_SDK_VERSION,
-                Some(&mut device),
-                Some(&mut feature_level),
-                Some(&mut context),
-            )?;
-            let device = device.ok_or_else(Error::from_win32)?;
-            let context = context.ok_or_else(Error::from_win32)?;
+            let (device, context) = create_device(Some(&d3d_adapter), D3D_DRIVER_TYPE_UNKNOWN)?;
 
             let captured_desc = D3D11_TEXTURE2D_DESC {
                 Width: width,
@@ -527,90 +767,11 @@ impl Gpu {
             let mut render_target = None;
             device.CreateRenderTargetView(&back_buffer, None, Some(&mut render_target))?;
             let render_target = render_target.ok_or_else(Error::from_win32)?;
-            let initial_scene = SceneConstants::default();
-            let scene_data = D3D11_SUBRESOURCE_DATA {
-                pSysMem: (&initial_scene as *const SceneConstants).cast(),
-                SysMemPitch: 0,
-                SysMemSlicePitch: 0,
-            };
-            let scene_desc = D3D11_BUFFER_DESC {
-                ByteWidth: size_of::<SceneConstants>() as u32,
-                Usage: D3D11_USAGE_DEFAULT,
-                BindFlags: D3D11_BIND_CONSTANT_BUFFER.0 as u32,
-                CPUAccessFlags: 0,
-                MiscFlags: 0,
-                StructureByteStride: 0,
-            };
-            let mut scene_buffer = None;
-            device.CreateBuffer(&scene_desc, Some(&scene_data), Some(&mut scene_buffer))?;
-            let scene_buffer = scene_buffer.ok_or_else(Error::from_win32)?;
-            let blur_width = width.div_ceil(BLUR_SCALE);
-            let blur_height = height.div_ceil(BLUR_SCALE);
-            let blur_desc = D3D11_TEXTURE2D_DESC {
-                Width: blur_width,
-                Height: blur_height,
-                MipLevels: 1,
-                ArraySize: 1,
-                Format: DXGI_FORMAT_B8G8R8A8_UNORM,
-                SampleDesc: DXGI_SAMPLE_DESC {
-                    Count: 1,
-                    Quality: 0,
-                },
-                Usage: D3D11_USAGE_DEFAULT,
-                BindFlags: D3D11_BIND_RENDER_TARGET.0 as u32 | D3D11_BIND_SHADER_RESOURCE.0 as u32,
-                CPUAccessFlags: 0,
-                MiscFlags: 0,
-            };
-            let (blur_render_target, blur_view) = create_blur_target(&device, &blur_desc)?;
-            let (prefilter_render_target, prefilter_view) =
-                create_blur_target(&device, &blur_desc)?;
-            let (horizontal_render_target, horizontal_view) =
-                create_blur_target(&device, &blur_desc)?;
-            let (wide_horizontal_render_target, wide_horizontal_view) =
-                create_blur_target(&device, &blur_desc)?;
-            let (wide_blur_render_target, wide_blur_view) =
-                create_blur_target(&device, &blur_desc)?;
+            let scene_buffer = create_scene_buffer(&device)?;
+            let blur = BlurTargets::new(&device, width, height, blur_scale)?;
             context.ClearRenderTargetView(&render_target, &[0.0, 0.0, 0.0, 0.0]);
             swap_chain.Present(0, DXGI_PRESENT(0)).ok()?;
-            let vertex_shader = create_vertex_shader(&device)?;
-            let prepare_pixel_shader = create_pixel_shader(&device, PS_PREPARE)?;
-            let horizontal_pixel_shader = create_pixel_shader(&device, PS_BLUR_HORIZONTAL)?;
-            let vertical_pixel_shader = create_pixel_shader(&device, PS_BLUR_VERTICAL)?;
-            let wide_horizontal_pixel_shader =
-                create_pixel_shader(&device, PS_BLUR_WIDE_HORIZONTAL)?;
-            let wide_vertical_pixel_shader = create_pixel_shader(&device, PS_BLUR_WIDE_VERTICAL)?;
-            let blur_pixel_shader = create_pixel_shader(&device, PS_BLUR)?;
-            let composite_pixel_shader = create_pixel_shader(&device, PS_COMPOSITE)?;
-            let sampler_desc = D3D11_SAMPLER_DESC {
-                Filter: D3D11_FILTER_MIN_MAG_MIP_LINEAR,
-                AddressU: D3D11_TEXTURE_ADDRESS_CLAMP,
-                AddressV: D3D11_TEXTURE_ADDRESS_CLAMP,
-                AddressW: D3D11_TEXTURE_ADDRESS_CLAMP,
-                MipLODBias: 0.0,
-                MaxAnisotropy: 1,
-                ComparisonFunc: windows::Win32::Graphics::Direct3D11::D3D11_COMPARISON_NEVER,
-                BorderColor: [0.0; 4],
-                MinLOD: 0.0,
-                MaxLOD: f32::MAX,
-            };
-            let mut sampler = None;
-            device.CreateSamplerState(&sampler_desc, Some(&mut sampler))?;
-            let sampler = sampler.ok_or_else(Error::from_win32)?;
-            let rasterizer_desc = D3D11_RASTERIZER_DESC {
-                FillMode: windows::Win32::Graphics::Direct3D11::D3D11_FILL_SOLID,
-                CullMode: windows::Win32::Graphics::Direct3D11::D3D11_CULL_NONE,
-                FrontCounterClockwise: BOOL(0),
-                DepthBias: 0,
-                DepthBiasClamp: 0.0,
-                SlopeScaledDepthBias: 0.0,
-                DepthClipEnable: BOOL(1),
-                ScissorEnable: BOOL(1),
-                MultisampleEnable: BOOL(0),
-                AntialiasedLineEnable: BOOL(0),
-            };
-            let mut rasterizer = None;
-            device.CreateRasterizerState(&rasterizer_desc, Some(&mut rasterizer))?;
-            let rasterizer = rasterizer.ok_or_else(Error::from_win32)?;
+            let shaders = AmbientShaders::new(&device)?;
 
             Ok(Self {
                 width,
@@ -625,36 +786,19 @@ impl Gpu {
                 _composition: composition,
                 render_target,
                 scene_buffer,
-                blur_render_target,
-                blur_view,
-                prefilter_render_target,
-                prefilter_view,
-                horizontal_render_target,
-                horizontal_view,
-                wide_horizontal_render_target,
-                wide_horizontal_view,
-                wide_blur_render_target,
-                wide_blur_view,
-                blur_width,
-                blur_height,
+                blur,
                 captured_texture,
                 captured_view,
                 has_captured_frame: false,
-                vertex_shader,
-                prepare_pixel_shader,
-                horizontal_pixel_shader,
-                vertical_pixel_shader,
-                wide_horizontal_pixel_shader,
-                wide_vertical_pixel_shader,
-                blur_pixel_shader,
-                composite_pixel_shader,
-                sampler,
-                rasterizer,
+                shaders,
             })
         }
     }
 
     fn render(&mut self, scene: &SceneGeometry) -> Result<Capture> {
+        if self.blur.scale != scene.blur_scale {
+            self.blur = BlurTargets::new(&self.device, self.width, self.height, scene.blur_scale)?;
+        }
         if self.duplication.is_none() {
             if !self.capture_retry.is_ready() {
                 return Ok(Capture::Healthy);
@@ -716,31 +860,11 @@ impl Gpu {
                 render_target: &self.render_target,
                 scene_buffer: &self.scene_buffer,
                 scene,
-                blur_render_target: &self.blur_render_target,
-                blur_view: &self.blur_view,
-                prefilter_render_target: &self.prefilter_render_target,
-                prefilter_view: &self.prefilter_view,
-                horizontal_render_target: &self.horizontal_render_target,
-                horizontal_view: &self.horizontal_view,
-                wide_horizontal_render_target: &self.wide_horizontal_render_target,
-                wide_horizontal_view: &self.wide_horizontal_view,
-                wide_blur_render_target: &self.wide_blur_render_target,
-                wide_blur_view: &self.wide_blur_view,
+                blur: &self.blur,
                 source,
-                vertex_shader: &self.vertex_shader,
-                prepare_pixel_shader: &self.prepare_pixel_shader,
-                horizontal_pixel_shader: &self.horizontal_pixel_shader,
-                vertical_pixel_shader: &self.vertical_pixel_shader,
-                wide_horizontal_pixel_shader: &self.wide_horizontal_pixel_shader,
-                wide_vertical_pixel_shader: &self.wide_vertical_pixel_shader,
-                blur_pixel_shader: &self.blur_pixel_shader,
-                composite_pixel_shader: &self.composite_pixel_shader,
-                sampler: &self.sampler,
-                rasterizer: &self.rasterizer,
+                shaders: &self.shaders,
                 width: self.width,
                 height: self.height,
-                blur_width: self.blur_width,
-                blur_height: self.blur_height,
             })?;
             self.swap_chain.Present(0, DXGI_PRESENT(0)).ok()?;
         }
@@ -763,31 +887,11 @@ unsafe fn draw_ambient(pass: AmbientPass<'_>) -> Result<()> {
         render_target,
         scene_buffer,
         scene,
-        blur_render_target,
-        blur_view,
-        prefilter_render_target,
-        prefilter_view,
-        horizontal_render_target,
-        horizontal_view,
-        wide_horizontal_render_target,
-        wide_horizontal_view,
-        wide_blur_render_target,
-        wide_blur_view,
+        blur,
         source,
-        vertex_shader,
-        prepare_pixel_shader,
-        horizontal_pixel_shader,
-        vertical_pixel_shader,
-        wide_horizontal_pixel_shader,
-        wide_vertical_pixel_shader,
-        blur_pixel_shader,
-        composite_pixel_shader,
-        sampler,
-        rasterizer,
+        shaders,
         width,
         height,
-        blur_width,
-        blur_height,
     } = pass;
     unsafe {
         context.UpdateSubresource(
@@ -798,7 +902,7 @@ unsafe fn draw_ambient(pass: AmbientPass<'_>) -> Result<()> {
             0,
             0,
         );
-        let regions = ambient_regions(scene.rect, width, height);
+        let regions = ambient_regions(scene.clear_rect, width, height);
         let screen_scissors = regions.map(|region| RECT {
             left: region.left,
             top: region.top,
@@ -808,89 +912,67 @@ unsafe fn draw_ambient(pass: AmbientPass<'_>) -> Result<()> {
         let blur_screen = [RECT {
             left: 0,
             top: 0,
-            right: blur_width as i32,
-            bottom: blur_height as i32,
+            right: blur.width as i32,
+            bottom: blur.height as i32,
         }];
         let pipeline = FullscreenPipeline {
             context,
-            vertex_shader,
+            vertex_shader: &shaders.vertex,
             scene_buffer,
-            sampler,
-            rasterizer,
+            sampler: &shaders.sampler,
+            rasterizer: &shaders.rasterizer,
         };
-        context.ClearRenderTargetView(prefilter_render_target, &[0.0, 0.0, 0.0, 0.0]);
-        draw_fullscreen_pass(
-            &pipeline,
-            FullscreenPass {
-                render_target: prefilter_render_target,
-                width: blur_width,
-                height: blur_height,
-                pixel_shader: prepare_pixel_shader,
-                sources: [Some(source.clone()), None, None, None],
-                scissors: &blur_screen,
-            },
+        let blur_pass = |target: &BlurTarget,
+                         pixel_shader: &ID3D11PixelShader,
+                         sources: [Option<ID3D11ShaderResourceView>; 4]| {
+            draw_fullscreen_pass(
+                &pipeline,
+                FullscreenPass {
+                    render_target: &target.render_target,
+                    width: blur.width,
+                    height: blur.height,
+                    pixel_shader,
+                    sources,
+                    scissors: &blur_screen,
+                },
+            );
+        };
+        blur_pass(
+            &blur.prefilter,
+            &shaders.prepare,
+            [Some(source.clone()), None, None, None],
         );
-        draw_fullscreen_pass(
-            &pipeline,
-            FullscreenPass {
-                render_target: horizontal_render_target,
-                width: blur_width,
-                height: blur_height,
-                pixel_shader: horizontal_pixel_shader,
-                sources: [None, Some(prefilter_view.clone()), None, None],
-                scissors: &blur_screen,
-            },
+        context.OMSetRenderTargets(None, None::<&ID3D11DepthStencilView>);
+        context.GenerateMips(&blur.prefilter.view);
+        blur_pass(
+            &blur.horizontal,
+            &shaders.horizontal,
+            [None, Some(blur.prefilter.view.clone()), None, None],
         );
-        draw_fullscreen_pass(
-            &pipeline,
-            FullscreenPass {
-                render_target: blur_render_target,
-                width: blur_width,
-                height: blur_height,
-                pixel_shader: vertical_pixel_shader,
-                sources: [None, Some(horizontal_view.clone()), None, None],
-                scissors: &blur_screen,
-            },
+        blur_pass(
+            &blur.narrow,
+            &shaders.vertical,
+            [None, Some(blur.horizontal.view.clone()), None, None],
         );
-        draw_fullscreen_pass(
-            &pipeline,
-            FullscreenPass {
-                render_target: wide_horizontal_render_target,
-                width: blur_width,
-                height: blur_height,
-                pixel_shader: wide_horizontal_pixel_shader,
-                sources: [None, Some(blur_view.clone()), None, None],
-                scissors: &blur_screen,
-            },
+        blur_pass(
+            &blur.wide_horizontal,
+            &shaders.wide_horizontal,
+            [None, Some(blur.narrow.view.clone()), None, None],
         );
-        draw_fullscreen_pass(
-            &pipeline,
-            FullscreenPass {
-                render_target: wide_blur_render_target,
-                width: blur_width,
-                height: blur_height,
-                pixel_shader: wide_vertical_pixel_shader,
-                sources: [None, Some(wide_horizontal_view.clone()), None, None],
-                scissors: &blur_screen,
-            },
+        blur_pass(
+            &blur.wide,
+            &shaders.wide_vertical,
+            [None, Some(blur.wide_horizontal.view.clone()), None, None],
         );
-
-        context.ClearRenderTargetView(prefilter_render_target, &[0.0, 0.0, 0.0, 0.0]);
-        draw_fullscreen_pass(
-            &pipeline,
-            FullscreenPass {
-                render_target: prefilter_render_target,
-                width: blur_width,
-                height: blur_height,
-                pixel_shader: blur_pixel_shader,
-                sources: [
-                    Some(source.clone()),
-                    Some(wide_blur_view.clone()),
-                    Some(blur_view.clone()),
-                    None,
-                ],
-                scissors: &blur_screen,
-            },
+        blur_pass(
+            &blur.ambient,
+            &shaders.blur,
+            [
+                Some(source.clone()),
+                Some(blur.wide.view.clone()),
+                Some(blur.narrow.view.clone()),
+                None,
+            ],
         );
 
         context.ClearRenderTargetView(render_target, &[0.0, 0.0, 0.0, 0.0]);
@@ -900,12 +982,12 @@ unsafe fn draw_ambient(pass: AmbientPass<'_>) -> Result<()> {
                 render_target,
                 width,
                 height,
-                pixel_shader: composite_pixel_shader,
+                pixel_shader: &shaders.composite,
                 sources: [
                     Some(source.clone()),
-                    Some(prefilter_view.clone()),
+                    Some(blur.ambient.view.clone()),
                     None,
-                    None,
+                    Some(blur.prefilter.view.clone()),
                 ],
                 scissors: &screen_scissors,
             },
@@ -1048,6 +1130,10 @@ unsafe fn create_pixel_shader(device: &ID3D11Device, bytecode: &[u8]) -> Result<
     shader.ok_or_else(Error::from_win32)
 }
 
+mod preview;
+
+pub use preview::{Preview, PreviewImage, primary_screen_size};
+
 #[cfg(test)]
 mod tests {
     use std::mem::size_of;
@@ -1057,7 +1143,7 @@ mod tests {
     use windows::Win32::Graphics::Direct3D11::{
         D3D11_BIND_RENDER_TARGET, D3D11_BIND_SHADER_RESOURCE, D3D11_CPU_ACCESS_READ,
         D3D11_MAP_READ, D3D11_SUBRESOURCE_DATA, D3D11_TEXTURE2D_DESC, D3D11_USAGE_DEFAULT,
-        D3D11_USAGE_STAGING, D3D11CreateDevice,
+        D3D11_USAGE_STAGING,
     };
     use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_R8G8B8A8_UNORM;
 
@@ -1070,14 +1156,29 @@ mod tests {
         striped_content: bool,
         red_box: Option<ScreenRect>,
         spatial_gradient: bool,
+        edge_blend: u32,
+        edge_softness: u32,
     }
 
-    fn test_scene(rect: ScreenRect) -> SceneGeometry {
+    const TEST_BLUR_SCALE: u32 = 4;
+
+    fn test_scene(rect: ScreenRect, edge_blend: u32, edge_softness: u32) -> SceneGeometry {
         let content = content_bounds(rect, WIDTH, HEIGHT).unwrap();
+        let edge_inset = edge_softness.max(if edge_blend > 0 { 2 } else { 0 });
+        let clear_rect = inset_bar_edges(rect, WIDTH, HEIGHT, edge_inset);
+        let sample = content_bounds(clear_rect, WIDTH, HEIGHT).unwrap();
         SceneGeometry {
-            rect,
+            clear_rect,
+            blur_scale: TEST_BLUR_SCALE,
             constants: SceneConstants {
                 content_rect: [content.left, content.top, content.right, content.bottom],
+                sample_rect: [sample.left, sample.top, sample.right, sample.bottom],
+                edge_inset: edge_inset as f32,
+                _padding: [0.0; 3],
+                blur_sigma: 1.5,
+                blur_radius: 5.0,
+                edge_blend: edge_blend as f32,
+                downsample: TEST_BLUR_SCALE as f32,
             },
         }
     }
@@ -1105,26 +1206,7 @@ mod tests {
         pattern: TestPattern,
     ) -> Result<Vec<[u8; 4]>> {
         unsafe {
-            let mut device = None;
-            let mut context = None;
-            let mut feature_level = D3D_FEATURE_LEVEL_11_0;
-            D3D11CreateDevice(
-                None,
-                D3D_DRIVER_TYPE_WARP,
-                windows::Win32::Foundation::HMODULE::default(),
-                D3D11_CREATE_DEVICE_BGRA_SUPPORT,
-                Some(&[
-                    D3D_FEATURE_LEVEL_11_0,
-                    D3D_FEATURE_LEVEL_10_1,
-                    D3D_FEATURE_LEVEL_10_0,
-                ]),
-                D3D11_SDK_VERSION,
-                Some(&mut device),
-                Some(&mut feature_level),
-                Some(&mut context),
-            )?;
-            let device = device.ok_or_else(Error::from_win32)?;
-            let context = context.ok_or_else(Error::from_win32)?;
+            let (device, context) = create_device(None, D3D_DRIVER_TYPE_WARP)?;
 
             let mut pixels = Vec::with_capacity((WIDTH * HEIGHT) as usize);
             for y in 0..HEIGHT {
@@ -1223,112 +1305,21 @@ mod tests {
             device.CreateRenderTargetView(&output_texture, None, Some(&mut render_target))?;
             let render_target = render_target.ok_or_else(Error::from_win32)?;
 
-            let blur_width = WIDTH.div_ceil(BLUR_SCALE);
-            let blur_height = HEIGHT.div_ceil(BLUR_SCALE);
-            let blur_desc = D3D11_TEXTURE2D_DESC {
-                Width: blur_width,
-                Height: blur_height,
-                BindFlags: D3D11_BIND_RENDER_TARGET.0 as u32 | D3D11_BIND_SHADER_RESOURCE.0 as u32,
-                ..texture_desc
-            };
-            let (blur_render_target, blur_view) = create_blur_target(&device, &blur_desc)?;
-            let (prefilter_render_target, prefilter_view) =
-                create_blur_target(&device, &blur_desc)?;
-            let (horizontal_render_target, horizontal_view) =
-                create_blur_target(&device, &blur_desc)?;
-            let (wide_horizontal_render_target, wide_horizontal_view) =
-                create_blur_target(&device, &blur_desc)?;
-            let (wide_blur_render_target, wide_blur_view) =
-                create_blur_target(&device, &blur_desc)?;
-            let scene = test_scene(content);
-            let scene_data = D3D11_SUBRESOURCE_DATA {
-                pSysMem: (&scene.constants as *const SceneConstants).cast(),
-                SysMemPitch: 0,
-                SysMemSlicePitch: 0,
-            };
-            let scene_desc = D3D11_BUFFER_DESC {
-                ByteWidth: size_of::<SceneConstants>() as u32,
-                Usage: D3D11_USAGE_DEFAULT,
-                BindFlags: D3D11_BIND_CONSTANT_BUFFER.0 as u32,
-                CPUAccessFlags: 0,
-                MiscFlags: 0,
-                StructureByteStride: 0,
-            };
-            let mut scene_buffer = None;
-            device.CreateBuffer(&scene_desc, Some(&scene_data), Some(&mut scene_buffer))?;
-            let scene_buffer = scene_buffer.ok_or_else(Error::from_win32)?;
-
-            let sampler_desc = D3D11_SAMPLER_DESC {
-                Filter: D3D11_FILTER_MIN_MAG_MIP_LINEAR,
-                AddressU: D3D11_TEXTURE_ADDRESS_CLAMP,
-                AddressV: D3D11_TEXTURE_ADDRESS_CLAMP,
-                AddressW: D3D11_TEXTURE_ADDRESS_CLAMP,
-                MipLODBias: 0.0,
-                MaxAnisotropy: 1,
-                ComparisonFunc: windows::Win32::Graphics::Direct3D11::D3D11_COMPARISON_NEVER,
-                BorderColor: [0.0; 4],
-                MinLOD: 0.0,
-                MaxLOD: f32::MAX,
-            };
-            let mut sampler = None;
-            device.CreateSamplerState(&sampler_desc, Some(&mut sampler))?;
-            let sampler = sampler.ok_or_else(Error::from_win32)?;
-
-            let rasterizer_desc = D3D11_RASTERIZER_DESC {
-                FillMode: windows::Win32::Graphics::Direct3D11::D3D11_FILL_SOLID,
-                CullMode: windows::Win32::Graphics::Direct3D11::D3D11_CULL_NONE,
-                FrontCounterClockwise: BOOL(0),
-                DepthBias: 0,
-                DepthBiasClamp: 0.0,
-                SlopeScaledDepthBias: 0.0,
-                DepthClipEnable: BOOL(1),
-                ScissorEnable: BOOL(1),
-                MultisampleEnable: BOOL(0),
-                AntialiasedLineEnable: BOOL(0),
-            };
-            let mut rasterizer = None;
-            device.CreateRasterizerState(&rasterizer_desc, Some(&mut rasterizer))?;
-            let rasterizer = rasterizer.ok_or_else(Error::from_win32)?;
-            let vertex_shader = create_vertex_shader(&device)?;
-            let prepare_pixel_shader = create_pixel_shader(&device, PS_PREPARE)?;
-            let horizontal_pixel_shader = create_pixel_shader(&device, PS_BLUR_HORIZONTAL)?;
-            let vertical_pixel_shader = create_pixel_shader(&device, PS_BLUR_VERTICAL)?;
-            let wide_horizontal_pixel_shader =
-                create_pixel_shader(&device, PS_BLUR_WIDE_HORIZONTAL)?;
-            let wide_vertical_pixel_shader = create_pixel_shader(&device, PS_BLUR_WIDE_VERTICAL)?;
-            let blur_pixel_shader = create_pixel_shader(&device, PS_BLUR)?;
-            let composite_pixel_shader = create_pixel_shader(&device, PS_COMPOSITE)?;
+            let blur = BlurTargets::new(&device, WIDTH, HEIGHT, TEST_BLUR_SCALE)?;
+            let scene = test_scene(content, pattern.edge_blend, pattern.edge_softness);
+            let scene_buffer = create_scene_buffer(&device)?;
+            let shaders = AmbientShaders::new(&device)?;
 
             draw_ambient(AmbientPass {
                 context: &context,
                 render_target: &render_target,
                 scene_buffer: &scene_buffer,
                 scene: &scene,
-                blur_render_target: &blur_render_target,
-                blur_view: &blur_view,
-                prefilter_render_target: &prefilter_render_target,
-                prefilter_view: &prefilter_view,
-                horizontal_render_target: &horizontal_render_target,
-                horizontal_view: &horizontal_view,
-                wide_horizontal_render_target: &wide_horizontal_render_target,
-                wide_horizontal_view: &wide_horizontal_view,
-                wide_blur_render_target: &wide_blur_render_target,
-                wide_blur_view: &wide_blur_view,
+                blur: &blur,
                 source: &source_view,
-                vertex_shader: &vertex_shader,
-                prepare_pixel_shader: &prepare_pixel_shader,
-                horizontal_pixel_shader: &horizontal_pixel_shader,
-                vertical_pixel_shader: &vertical_pixel_shader,
-                wide_horizontal_pixel_shader: &wide_horizontal_pixel_shader,
-                wide_vertical_pixel_shader: &wide_vertical_pixel_shader,
-                blur_pixel_shader: &blur_pixel_shader,
-                composite_pixel_shader: &composite_pixel_shader,
-                sampler: &sampler,
-                rasterizer: &rasterizer,
+                shaders: &shaders,
                 width: WIDTH,
                 height: HEIGHT,
-                blur_width,
-                blur_height,
             })?;
 
             let staging_desc = D3D11_TEXTURE2D_DESC {
@@ -1604,6 +1595,157 @@ mod tests {
             bright[sample][3] > 100,
             "bright margin pixels must not disable the configured effect"
         );
+    }
+
+    #[test]
+    fn edge_blend_covers_only_the_outermost_edge_and_hides_its_fringe() {
+        let content = ScreenRect {
+            left: 8,
+            top: 4,
+            right: 32,
+            bottom: 20,
+        };
+        let render = |fringe: bool| {
+            render_scene_with_frame(
+                content,
+                [0, 0, 0, 255],
+                [20, 60, 220, 255],
+                false,
+                TestPattern {
+                    frame: fringe.then_some(([250, 20, 20, 255], 1)),
+                    edge_blend: 6,
+                    ..TestPattern::default()
+                },
+            )
+            .expect("WARP should render the edge blend")
+        };
+        let fringed = render(true);
+        let clean = render(false);
+        let pixel = |scene: &[[u8; 4]], x: u32, y: u32| scene[(y * WIDTH + x) as usize];
+
+        for x in 10..30 {
+            for y in 6..18 {
+                assert_eq!(
+                    pixel(&fringed, x, y)[3],
+                    0,
+                    "content at ({x}, {y}) stays clear"
+                );
+            }
+        }
+        let covered = pixel(&fringed, 8, 12);
+        assert!(
+            covered[3] > 150,
+            "the outermost column is covered: {covered:?}"
+        );
+        assert!(
+            covered[2] > covered[0],
+            "the red fringe is replaced by the picture beside it: {covered:?}"
+        );
+        let bar = pixel(&fringed, 7, 12);
+        assert_eq!(
+            bar[3], 255,
+            "the bar meets the picture fully opaque: {bar:?}"
+        );
+        assert!(
+            bar[2] > 150 && bar[0] < 80,
+            "the bar continues the picture: {bar:?}"
+        );
+        for x in 0..8 {
+            assert_eq!(
+                pixel(&fringed, x, 12),
+                pixel(&clean, x, 12),
+                "the fringe never reaches the bar at x = {x}"
+            );
+        }
+    }
+
+    #[test]
+    fn edge_softness_hides_the_picture_edge_and_fades_into_the_picture() {
+        let content = ScreenRect {
+            left: 8,
+            top: 4,
+            right: 32,
+            bottom: 20,
+        };
+        let scene = render_scene_with_frame(
+            content,
+            [0, 0, 0, 255],
+            [20, 60, 220, 255],
+            false,
+            TestPattern {
+                frame: Some(([250, 20, 20, 255], 1)),
+                edge_softness: 4,
+                ..TestPattern::default()
+            },
+        )
+        .expect("WARP should render edge softness");
+        let pixel = |x: u32, y: u32| scene[(y * WIDTH + x) as usize];
+
+        let edge = pixel(8, 12);
+        assert_eq!(
+            edge[3], 255,
+            "the picture's own edge is fully covered: {edge:?}"
+        );
+        assert!(edge[2] > edge[0], "its fringe is hidden too: {edge:?}");
+        let band: Vec<u8> = (8..12).map(|x| pixel(x, 12)[3]).collect();
+        assert!(
+            band.windows(2).all(|pair| pair[0] >= pair[1]) && band[3] < band[0],
+            "the cover fades into the picture: {band:?}"
+        );
+        for x in 12..28 {
+            for y in 8..16 {
+                assert_eq!(pixel(x, y)[3], 0, "content at ({x}, {y}) stays clear");
+            }
+        }
+    }
+
+    #[test]
+    fn effect_strengths_scale_with_the_screen_and_resolution() {
+        let ratio = AspectRatio::new(16, 9).unwrap();
+        let effect = |edge_softness, edge_blend, blur, resolution| EffectSettings {
+            edge_softness,
+            edge_blend,
+            blur,
+            resolution,
+        };
+        let quarter = SceneGeometry::new(
+            3440,
+            1440,
+            ratio,
+            effect(50, 50, 50, crate::settings::BlurResolution::Quarter),
+        )
+        .unwrap();
+        assert_eq!(quarter.constants.edge_blend, 72.0);
+        assert_eq!(quarter.constants.edge_inset, 7.0);
+        assert_eq!(quarter.clear_rect.left, 440 + 7);
+        assert_eq!(quarter.clear_rect.top, 0, "no bar above, so no inset");
+
+        let blend_only = SceneGeometry::new(
+            3440,
+            1440,
+            ratio,
+            effect(0, 50, 50, crate::settings::BlurResolution::Quarter),
+        )
+        .unwrap();
+        assert_eq!(
+            blend_only.constants.edge_inset, 2.0,
+            "edge blend alone still covers the picture's fringe"
+        );
+        assert!((quarter.constants.blur_sigma - 7.2).abs() < 0.01);
+        assert_eq!(quarter.constants.blur_radius, 22.0);
+
+        let half = SceneGeometry::new(
+            3440,
+            1440,
+            ratio,
+            effect(0, 0, 100, crate::settings::BlurResolution::Half),
+        )
+        .unwrap();
+        assert_eq!(half.constants.edge_blend, 0.0);
+        assert_eq!(half.constants.edge_inset, 0.0);
+        assert_eq!(half.clear_rect, fit_content(3440, 1440, ratio).unwrap());
+        assert_eq!(half.constants.blur_radius, 87.0);
+        assert_eq!(half.blur_scale, 2);
     }
 
     #[test]

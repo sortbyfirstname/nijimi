@@ -34,23 +34,24 @@ use windows::Win32::UI::Shell::{
     Shell_NotifyIconW,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    AppendMenuW, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyMenu, DestroyWindow,
-    DispatchMessageW, FindWindowW, GWLP_USERDATA, GetCursorPos, GetDlgItem, GetForegroundWindow,
-    GetMessageW, GetWindowLongPtrW, GetWindowTextW, GetWindowThreadProcessId, HICON, HMENU,
-    IDC_ARROW, KillTimer, LB_ADDSTRING, LB_GETCURSEL, LB_RESETCONTENT, LB_SETCURSEL, LoadCursorW,
-    MENU_ITEM_FLAGS, MF_STRING, MSG, MessageBoxW, PostMessageW, PostQuitMessage, RegisterClassW,
-    RegisterWindowMessageW, SW_HIDE, SW_SHOW, SendMessageW, SetForegroundWindow, SetTimer,
-    SetWindowLongPtrW, SetWindowTextW, ShowWindow, TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenu,
-    TranslateMessage, WINDOW_EX_STYLE, WINDOW_STYLE, WM_APP, WM_CLOSE, WM_COMMAND, WM_CREATE,
-    WM_CTLCOLORBTN, WM_CTLCOLOREDIT, WM_CTLCOLORLISTBOX, WM_CTLCOLORSTATIC, WM_DESTROY,
-    WM_DISPLAYCHANGE, WM_DRAWITEM, WM_ERASEBKGND, WM_LBUTTONUP, WM_NCCREATE, WM_NCDESTROY,
-    WM_RBUTTONUP, WM_SETFONT, WM_TIMER, WNDCLASSW,
+    ASFW_ANY, AllowSetForegroundWindow, AppendMenuW, CreatePopupMenu, CreateWindowExW,
+    DefWindowProcW, DestroyMenu, DestroyWindow, DispatchMessageW, FindWindowExW, FindWindowW,
+    GWLP_USERDATA, GetCursorPos, GetDlgItem, GetForegroundWindow, GetMessageW, GetWindowLongPtrW,
+    GetWindowTextW, GetWindowThreadProcessId, HICON, HMENU, IDC_ARROW, KillTimer, LB_ADDSTRING,
+    LB_GETCURSEL, LB_RESETCONTENT, LB_SETCURSEL, LoadCursorW, MENU_ITEM_FLAGS, MF_STRING, MSG,
+    MessageBoxW, PostMessageW, PostQuitMessage, RegisterClassW, RegisterWindowMessageW, SW_HIDE,
+    SW_SHOW, SendMessageW, SetForegroundWindow, SetTimer, SetWindowLongPtrW, SetWindowTextW,
+    ShowWindow, TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenu, TranslateMessage, WINDOW_EX_STYLE,
+    WINDOW_STYLE, WM_APP, WM_CLOSE, WM_COMMAND, WM_CREATE, WM_CTLCOLORBTN, WM_CTLCOLOREDIT,
+    WM_CTLCOLORLISTBOX, WM_CTLCOLORSTATIC, WM_DESTROY, WM_DISPLAYCHANGE, WM_DRAWITEM,
+    WM_ERASEBKGND, WM_LBUTTONUP, WM_NCCREATE, WM_NCDESTROY, WM_RBUTTONUP, WM_SETFONT, WM_TIMER,
+    WNDCLASSW,
 };
 use windows::core::{Error, PCWSTR, PWSTR, Result, w};
 
 use crate::geometry::AspectRatio;
 use crate::render::Renderer;
-use crate::settings::{self, AppProfile, AppSettings, paths_match};
+use crate::settings::{self, ActiveProfile, AppProfile, AppSettings, paths_match};
 
 const TRAY_CALLBACK: u32 = WM_APP + 1;
 const FOREGROUND_CHANGED: u32 = WM_APP + 2;
@@ -138,8 +139,7 @@ struct AppState {
     /// foreground change. Re-armed when settings are saved or the display changes.
     enabled: bool,
     rendering: bool,
-    active_executable: Option<PathBuf>,
-    active_ratio: Option<AspectRatio>,
+    active: Option<ActiveProfile>,
     application_executable: PathBuf,
     icon: HICON,
     taskbar_created: u32,
@@ -230,15 +230,22 @@ fn ensure_dpi_awareness() -> Result<()> {
     }
 }
 
-pub fn run() -> Result<()> {
+/// Runs the tray app. `show_settings` opens the Settings window too, as when the user launches
+/// nijimi themselves; if nijimi is already running, that instance is asked to open it instead.
+pub fn run(show_settings: bool) -> Result<()> {
     unsafe {
         ensure_dpi_awareness()?;
         let mutex = CreateMutexW(None, false, w!("Local\\NijimiAmbientLight"))?;
         if windows::Win32::Foundation::GetLastError() == ERROR_ALREADY_EXISTS {
             let _ = CloseHandle(mutex);
+            if show_settings {
+                ask_running_tray_to_open_settings();
+            }
             return Ok(());
         }
         let _instance_mutex = InstanceMutex(mutex);
+        // Entries saved by earlier versions launch without the flag that keeps nijimi in the tray.
+        let _ = crate::startup::refresh();
         let instance = HINSTANCE(GetModuleHandleW(None)?.0);
         let class_icon = crate::app_icon::load_application_icon(32)?;
         let icon = crate::app_icon::load_application_icon(16)?;
@@ -268,8 +275,7 @@ pub fn run() -> Result<()> {
             renderer,
             enabled: true,
             rendering: false,
-            active_executable: None,
-            active_ratio: None,
+            active: None,
             application_executable,
             icon,
             taskbar_created,
@@ -344,6 +350,9 @@ pub fn run() -> Result<()> {
         }
         let _location_hook = ForegroundHook(location_hook);
         if let Some(error) = update_foreground(&mut state) {
+            show_error(&error);
+        }
+        if show_settings && let Some(error) = open_settings(&mut *state) {
             show_error(&error);
         }
         let mut message = MSG::default();
@@ -435,6 +444,9 @@ unsafe extern "system" fn window_proc(
     if message == WM_COMMAND {
         match (wparam.0 & 0xffff) as u32 {
             EXIT_COMMAND => unsafe {
+                if let Some(settings) = find_settings_window() {
+                    let _ = PostMessageW(settings, WM_CLOSE, WPARAM(0), LPARAM(0));
+                }
                 let _ = DestroyWindow(hwnd);
             },
             SETTINGS_COMMAND => {
@@ -501,8 +513,7 @@ unsafe extern "system" fn window_proc(
                 let _ = state.renderer.set_enabled(false);
                 state.enabled = false;
                 state.rendering = false;
-                state.active_executable = None;
-                state.active_ratio = None;
+                state.active = None;
                 let _ = KillTimer(state.hwnd, RENDER_TIMER);
                 sync_tray_status(state);
                 Some(format!("nijimi stopped rendering:\n{error}"))
@@ -522,8 +533,7 @@ unsafe extern "system" fn window_proc(
             if let Err(error) = state.renderer.refresh(state.rendering) {
                 let _ = state.renderer.set_enabled(false);
                 state.rendering = false;
-                state.active_executable = None;
-                state.active_ratio = None;
+                state.active = None;
                 let _ = KillTimer(state.hwnd, RENDER_TIMER);
                 sync_tray_status(state);
                 Some(format!("nijimi could not refresh the display:\n{error}"))
@@ -756,8 +766,7 @@ fn apply_foreground(state: &mut AppState) -> Option<String> {
         if state.rendering {
             let result = state.renderer.pause();
             state.rendering = false;
-            state.active_executable = None;
-            state.active_ratio = None;
+            state.active = None;
             unsafe {
                 let _ = KillTimer(state.hwnd, RENDER_TIMER);
                 if SetTimer(state.hwnd, RELEASE_TIMER, RELEASE_AFTER_MS, None) == 0 {
@@ -772,36 +781,35 @@ fn apply_foreground(state: &mut AppState) -> Option<String> {
         return None;
     }
 
-    let (executable, ratio) = selected.unwrap();
-    if state.rendering && state.active_executable == executable && state.active_ratio == Some(ratio)
-    {
+    let selected = selected.unwrap();
+    if state.rendering && state.active.as_ref() == Some(&selected) {
         return None;
     }
-    if let Err(error) = state.renderer.set_aspect_ratio(ratio) {
+    if let Err(error) = state
+        .renderer
+        .configure(selected.aspect_ratio, selected.effect)
+    {
         return Some(format!(
             "nijimi could not apply the selected aspect ratio:\n{error}"
         ));
     }
     if let Err(error) = state.renderer.set_enabled(true) {
         state.rendering = false;
-        state.active_executable = None;
-        state.active_ratio = None;
+        state.active = None;
         return Some(format!("nijimi could not start rendering:\n{error}"));
     }
     if unsafe { SetTimer(state.hwnd, RENDER_TIMER, 33, None) } == 0 {
         let error = Error::from_win32();
         let _ = state.renderer.set_enabled(false);
         state.rendering = false;
-        state.active_executable = None;
-        state.active_ratio = None;
+        state.active = None;
         return Some(format!("nijimi could not start its render timer:\n{error}"));
     }
     unsafe {
         let _ = KillTimer(state.hwnd, RELEASE_TIMER);
     }
     state.rendering = true;
-    state.active_executable = executable;
-    state.active_ratio = Some(ratio);
+    state.active = Some(selected);
     None
 }
 
@@ -911,14 +919,50 @@ fn set_tip(tray: &mut NOTIFYICONDATAW, status: TrayStatus) {
     }
 }
 
+/// The Settings window, matched by its title *and* by belonging to this executable, so a File
+/// Explorer window open on a folder called "nijimi" is never mistaken for it.
+pub(crate) fn find_settings_window() -> Option<HWND> {
+    let executable = std::env::current_exe().ok()?;
+    let mut after = HWND::default();
+    loop {
+        let window = unsafe {
+            FindWindowExW(
+                HWND::default(),
+                after,
+                PCWSTR::null(),
+                PCWSTR(crate::settings_ui::WINDOW_TITLE_WIDE.as_ptr()),
+            )
+        }
+        .ok()
+        .filter(|window| !window.0.is_null())?;
+        if window_executable(window).is_some_and(|path| paths_match(&path, &executable)) {
+            return Some(window);
+        }
+        after = window;
+    }
+}
+
+/// Lets the running instance bring Settings to the front, using the foreground rights Windows
+/// gave this launch.
+fn ask_running_tray_to_open_settings() {
+    unsafe {
+        let _ = AllowSetForegroundWindow(ASFW_ANY);
+        if let Ok(tray) = FindWindowW(w!("NijimiTrayWindow"), PCWSTR::null())
+            && !tray.0.is_null()
+        {
+            let _ = PostMessageW(
+                tray,
+                WM_COMMAND,
+                WPARAM(SETTINGS_COMMAND as usize),
+                LPARAM(0),
+            );
+        }
+    }
+}
+
 unsafe fn open_settings(state_ptr: *mut AppState) -> Option<String> {
     unsafe {
-        let settings_window = FindWindowW(
-            windows::core::PCWSTR::null(),
-            PCWSTR(crate::settings_ui::WINDOW_TITLE_WIDE.as_ptr()),
-        )
-        .unwrap_or_default();
-        if !settings_window.0.is_null() {
+        if let Some(settings_window) = find_settings_window() {
             let _ = SetForegroundWindow(settings_window);
             return None;
         }
@@ -1714,9 +1758,14 @@ fn save_selected_profile(hwnd: HWND, state: &mut AppState) -> Option<String> {
         return None;
     }
     let previous = state.settings.clone();
+    let effect = state
+        .settings
+        .profile_for(&executable)
+        .and_then(|profile| profile.effect);
     state.settings.upsert(AppProfile {
         executable: executable.clone(),
         aspect_ratio,
+        effect,
     });
     if let Err(error) = state.settings.save(&state.settings_path) {
         state.settings = previous;
@@ -1757,6 +1806,7 @@ fn add_selected_profile(hwnd: HWND, state: &mut AppState) -> Option<String> {
     let profile = AppProfile {
         executable: executable.clone(),
         aspect_ratio: state.settings.default_aspect_ratio,
+        effect: None,
     };
     let previous = state.settings.clone();
     state.settings.upsert(profile);

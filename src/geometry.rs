@@ -98,6 +98,23 @@ pub fn content_bounds(rect: ScreenRect, width: u32, height: u32) -> Option<Conte
     })
 }
 
+/// Shrinks `rect` by `amount` on each side that borders a bar. Sides touching the screen edge
+/// stay put, and the inset is capped at a quarter of the content's shorter side.
+pub fn inset_bar_edges(rect: ScreenRect, width: u32, height: u32, amount: u32) -> ScreenRect {
+    let Some(content) = clip_to_screen(rect, width, height) else {
+        return rect;
+    };
+    let shorter_side = (content.right - content.left).min(content.bottom - content.top);
+    let amount = (amount as i32).min(shorter_side / 4);
+    let inset = |has_bar: bool| if has_bar { amount } else { 0 };
+    ScreenRect {
+        left: content.left + inset(content.left > 0),
+        top: content.top + inset(content.top > 0),
+        right: content.right - inset(content.right < width as i32),
+        bottom: content.bottom - inset(content.bottom < height as i32),
+    }
+}
+
 pub fn ambient_regions(rect: ScreenRect, width: u32, height: u32) -> [ScreenRect; 4] {
     let Some(content) = clip_to_screen(rect, width, height) else {
         return [ScreenRect::default(); 4];
@@ -267,6 +284,36 @@ mod tests {
             )
             .is_none()
         );
+    }
+
+    #[test]
+    fn insets_only_the_edges_that_border_a_bar() {
+        let pillarboxed = ScreenRect {
+            left: 440,
+            top: 0,
+            right: 3000,
+            bottom: 1440,
+        };
+        assert_eq!(
+            inset_bar_edges(pillarboxed, 3440, 1440, 8),
+            ScreenRect {
+                left: 448,
+                top: 0,
+                right: 2992,
+                bottom: 1440,
+            }
+        );
+        assert_eq!(
+            inset_bar_edges(pillarboxed, 3440, 1440, 10_000),
+            ScreenRect {
+                left: 800,
+                top: 0,
+                right: 2640,
+                bottom: 1440,
+            },
+            "the inset is capped at a quarter of the shorter side"
+        );
+        assert_eq!(inset_bar_edges(pillarboxed, 3440, 1440, 0), pillarboxed);
     }
 
     #[test]

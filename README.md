@@ -23,6 +23,7 @@ It's also built to cost your games next to nothing. The whole effect runs on the
 ## Features
 
 - **Per-game profiles.** Give each game its own aspect ratio (`16:9`, `21:9`, `32:9`, `16:10`, `4:3`, or any custom `width:height`).
+- **Tunable look.** Set edge softness (soften the picture's outermost few pixels), edge blend (blur the picture gradually into the bars instead of a hard line), blur strength, and blur resolution globally, and override them for any game. A live preview in Settings shows the result on a sample image, sized to your monitor.
 - **Automatic.** Turns on when a configured game is the foreground app on your primary display, and pauses on Alt-Tab.
 - **Lightweight.** Capture, blur, and compositing all stay on the GPU, and frames are never copied back to the CPU. Nothing renders while you're not playing, and there's no polling: it reacts to Windows events.
 - **Never covers the game.** The centred game area is left untouched; the effect is drawn only outside it.
@@ -36,7 +37,7 @@ nijimi exists to make games look better, so it can't be allowed to make them run
 - **Zero work when idle.** No game in focus means no capture, no rendering, and no timers. The app sleeps until Windows reports a foreground change.
 - **Nothing held when idle.** The graphics device, overlay surfaces, and capture are created only when a configured game comes to the front, and fully released a minute after it leaves (so a quick Alt-Tab and back is instant). Idle, nijimi holds no GPU memory at all.
 - **GPU-only pipeline.** Desktop frames are captured, blurred, and composited entirely in GPU memory. No pixels ever cross to the CPU.
-- **Cheap by construction.** The blur is computed at quarter resolution with separable passes, refreshed about 30 times a second rather than at your monitor's refresh rate, and only drawn outside the game area.
+- **Cheap by construction.** The blur is computed at reduced resolution (a quarter by default) with separable passes, refreshed about 30 times a second rather than at your monitor's refresh rate, and only drawn outside the game area.
 - **Doesn't touch the game.** No injection, no hooks inside the game's process, no driver. nijimi is a separate click-through window and nothing is ever loaded into the game.
 - **UI only when you open it.** The Settings window runs as its own short-lived process and exits when closed, so the always-running part carries no UI framework.
 
@@ -70,12 +71,12 @@ For scale, the game itself used 8.5% of the GPU over the same period. After Alt-
 ## Getting started
 
 1. Download the latest `nijimi-…-windows-x64.zip` from [Releases](../../releases/latest) (or [build it yourself](#building)) and extract it to a folder you can write to.
-2. Run it. The icon appears in the system tray.
-3. Click the tray icon to open **Settings**, choose **Add app…**, and pick your game from recently used apps, running processes, or **Browse…**.
+2. Run it. The icon appears in the system tray and **Settings** opens.
+3. In Settings, choose **Add app…**, and pick your game from recently used apps, running processes, or **Browse…**.
 4. Pick an aspect ratio. Changes save automatically.
 5. Launch the game. The ambient effect appears in the bars as soon as it's in front.
 
-Right-click the tray icon for **Settings** and **Exit**.
+Closing Settings leaves nijimi running in the tray. Click the tray icon or run nijimi again to reopen Settings, and right-click the tray icon for **Exit**, which also closes Settings.
 
 ### Requirements
 
@@ -87,7 +88,7 @@ Nothing else is needed. `nijimi.exe` is fully self-contained and doesn't need th
 ## Settings
 
 - **Program settings.** Lists your game profiles. Search by executable name or path, select a profile to change its aspect ratio, or remove it. Supported ratios range from `1:4` to `4:1`; invalid entries are rejected and the previous value is restored.
-- **Global settings.** Sets the default aspect ratio for new profiles (initially `21:9`); existing profiles keep their own ratios. **Always on** shows the effect whatever app is in front: profiled games still use their own ratio, and everything else uses the default. It's off by default, and while it's on nijimi keeps rendering instead of going idle. **Show in screenshots** lets screenshots and recordings capture the effect; it's off by default, so they normally show plain black bars. **Start with Windows** launches nijimi in the tray when you sign in. It's off by default and applies to the copy you turn it on from. If you move the executable, turn it off and on again.
+- **Global settings.** Sets the default aspect ratio for new profiles (initially `21:9`); existing profiles keep their own ratios. **Always on** shows the effect whatever app is in front: profiled games still use their own ratio, and everything else uses the default. It's off by default, and while it's on nijimi keeps rendering instead of going idle. **Show in screenshots** lets screenshots and recordings capture the effect; it's off by default, so they normally show plain black bars. **Start with Windows** launches nijimi in the tray when you sign in, without opening Settings. It's off by default and applies to the copy you turn it on from. If you move the executable, turn it off and on again.
 - **Add app.** Shows apps that were in the foreground while nijimi was running, followed by currently running processes (newest first). The list refreshes when you open it and with the refresh button. Windows may block access to elevated or protected processes.
 
 Settings are stored in `nijimi.ini` beside the executable. To move your setup, copy the executable and the INI file together. To carry settings over from an older build, copy its INI file next to the new executable and rename it to `nijimi.ini`.
@@ -121,9 +122,9 @@ Only one tray instance runs per Windows session. If Windows Explorer restarts, t
 ### Rendering pipeline
 
 1. **Capture.** The desktop is captured with DXGI Desktop Duplication. Frames stay in GPU memory and are never copied to the CPU. The latest frame is kept in a texture and redrawn even when DXGI reports no new frame.
-2. **Sample.** The content near the edges of the protected rectangle is reflected outward and filtered at quarter resolution.
-3. **Blur.** Wider separable blur passes produce a broad, soft glow, followed by a distance fade away from the content.
-4. **Composite.** The full-resolution result is clipped strictly to the area *outside* the protected rectangle and presented through a click-through DirectComposition overlay. The overlay excludes itself from capture so it never feeds back into its own input.
+2. **Sample.** The content near the edges of the protected rectangle is reflected outward and averaged down to the blur resolution (half, quarter, or eighth).
+3. **Blur.** A separable Gaussian sized by the blur strength, plus a wider smoothing pass, produces a broad, soft glow, followed by a distance fade away from the content. Intermediates are 10-bit and the result half-float, so wide gradients don't band.
+4. **Composite.** The full-resolution result is dithered and clipped to the area *outside* the protected rectangle, then presented through a click-through DirectComposition overlay. With edge softness or edge blend on, the overlay also covers the content's outermost few pixels (at most 1% of the screen's shorter side; video and games often have a fringe there), fully opaque at the very edge and fading into the picture. From the start of that band outwards the blur radius grows smoothly from zero to the glow's, read from a mip chain of the prefiltered texture, so sharpness falls off without a seam. The overlay excludes itself from capture by default, and because it never samples anything it draws over, it never feeds back into its own input even when screenshots are allowed to show it.
 
 The protected rectangle is computed with integer geometry, fitted and centred on the primary display for the selected ratio.
 

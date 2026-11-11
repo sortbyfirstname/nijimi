@@ -1,28 +1,31 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use gpui_kit::component::{
-    TitleBar,
+    Disableable as _, Sizable as _, TitleBar,
     button::{Button, ButtonVariants as _},
     input::{Input, InputEvent, InputState},
     scroll::ScrollableElement as _,
+    slider::{Slider, SliderEvent, SliderState},
     switch::Switch,
     theme::{Theme, ThemeMode},
 };
 use gpui_kit::{
     Animation, AnimationExt as _, App, AppContext as _, Bounds, Context, Entity, IntoElement,
-    ParentElement as _, Render, RenderImage, Styled as _, Subscription, SvgRenderer,
-    Transformation, Window, WindowBounds, WindowOptions, div, img, px, radians, rgb, size, svg,
+    ObjectFit, ParentElement as _, Render, RenderImage, Styled as _, StyledImage as _,
+    Subscription, SvgRenderer, Transformation, Window, WindowBounds, WindowOptions, div, img, px,
+    radians, rgb, size, svg,
 };
 use windows::Win32::Foundation::{CloseHandle, ERROR_ALREADY_EXISTS, HANDLE};
 use windows::Win32::System::Threading::{CreateMutexW, ReleaseMutex};
-use windows::Win32::UI::WindowsAndMessaging::{FindWindowW, SetForegroundWindow};
-use windows::core::{PCWSTR, w};
+use windows::Win32::UI::WindowsAndMessaging::SetForegroundWindow;
+use windows::core::w;
 
 use crate::geometry::AspectRatio;
-use crate::settings::{self, AppProfile, AppSettings, paths_match};
+use crate::render::{Preview, PreviewImage, primary_screen_size};
+use crate::settings::{self, AppProfile, AppSettings, BlurResolution, EffectSettings, paths_match};
 use crate::{app, app_icon, startup};
 
 pub const WINDOW_TITLE: &str = "nijimi";
@@ -56,15 +59,8 @@ pub fn run(recent_apps: Vec<PathBuf>) -> std::result::Result<(), String> {
     };
     if unsafe { windows::Win32::Foundation::GetLastError() } == ERROR_ALREADY_EXISTS {
         let _ = unsafe { CloseHandle(mutex) };
-        unsafe {
-            let window = FindWindowW(
-                windows::core::PCWSTR::null(),
-                PCWSTR(WINDOW_TITLE_WIDE.as_ptr()),
-            )
-            .unwrap_or_default();
-            if !window.0.is_null() {
-                let _ = SetForegroundWindow(window);
-            }
+        if let Some(window) = app::find_settings_window() {
+            let _ = unsafe { SetForegroundWindow(window) };
         }
         return Ok(());
     }
@@ -99,12 +95,7 @@ pub fn run(recent_apps: Vec<PathBuf>) -> std::result::Result<(), String> {
                 cx.quit();
                 return;
             }
-            if let Ok(window) = unsafe {
-                FindWindowW(
-                    windows::core::PCWSTR::null(),
-                    PCWSTR(WINDOW_TITLE_WIDE.as_ptr()),
-                )
-            } && !window.0.is_null()
+            if let Some(window) = app::find_settings_window()
                 && let Err(error) = app_icon::set_window_icons(window)
             {
                 app::show_error(&format!("Could not set the Settings window icon:\n{error}"));
@@ -144,11 +135,105 @@ fn updated_settings(
             updated.upsert(AppProfile {
                 executable: executable.to_path_buf(),
                 aspect_ratio: ratio,
+                effect: settings
+                    .profile_for(executable)
+                    .and_then(|profile| profile.effect),
             });
         }
         SettingsPage::Add => return None,
     }
     (updated != *settings).then_some(updated)
+}
+
+/// The effect shown on `page`: the global one, or the selected profile's (which may follow it).
+fn effect_on_page(
+    settings: &AppSettings,
+    page: SettingsPage,
+    selected_profile: Option<&Path>,
+) -> EffectSettings {
+    match (page, selected_profile) {
+        (SettingsPage::Program, Some(path)) => settings
+            .profile_for(path)
+            .and_then(|profile| profile.effect)
+            .unwrap_or(settings.default_effect),
+        _ => settings.default_effect,
+    }
+}
+
+/// Applies `change` to the effect on `page`. A profile's effect only changes once it has its own.
+fn with_effect_change(
+    settings: &AppSettings,
+    page: SettingsPage,
+    selected_profile: Option<&Path>,
+    change: impl FnOnce(&mut EffectSettings),
+) -> Option<AppSettings> {
+    let mut updated = settings.clone();
+    let effect = match page {
+        SettingsPage::Global => &mut updated.default_effect,
+        SettingsPage::Program => {
+            let path = selected_profile?;
+            updated
+                .profiles
+                .iter_mut()
+                .find(|profile| paths_match(&profile.executable, path))?
+                .effect
+                .as_mut()?
+        }
+        SettingsPage::Add => return None,
+    };
+    change(effect);
+    (updated != *settings).then_some(updated)
+}
+
+fn strength_slider(value: u8) -> SliderState {
+    SliderState::new()
+        .min(0.)
+        .max(EffectSettings::MAX_STRENGTH as f32)
+        .step(1.)
+        .default_value(value as f32)
+}
+
+fn slider_strength(slider: &SliderState) -> u8 {
+    slider
+        .value()
+        .start()
+        .round()
+        .clamp(0., EffectSettings::MAX_STRENGTH as f32) as u8
+}
+
+#[derive(Default)]
+struct PreviewState {
+    /// Created on first use, off the UI thread, and reused while the window is open.
+    renderer: Arc<Mutex<Option<Preview>>>,
+    screen_size: Option<(u32, u32)>,
+    image: Option<Arc<RenderImage>>,
+    error: Option<String>,
+    rendered: Option<(AspectRatio, EffectSettings)>,
+    busy: bool,
+}
+
+fn render_preview(
+    renderer: &Mutex<Option<Preview>>,
+    (screen_width, screen_height): (u32, u32),
+    (aspect_ratio, effect): (AspectRatio, EffectSettings),
+) -> Result<Arc<RenderImage>, String> {
+    let mut renderer = renderer.lock().map_err(|error| error.to_string())?;
+    if renderer.is_none() {
+        *renderer = Some(Preview::new().map_err(|error| error.to_string())?);
+    }
+    let PreviewImage {
+        width,
+        height,
+        bgra,
+    } = renderer
+        .as_mut()
+        .unwrap()
+        .render(screen_width, screen_height, aspect_ratio, effect)
+        .map_err(|error| error.to_string())?;
+    // GPUI's images hold BGRA bytes in an RGBA-typed buffer.
+    let buffer = image::RgbaImage::from_raw(width, height, bgra)
+        .ok_or("the preview image has the wrong size")?;
+    Ok(Arc::new(RenderImage::new(vec![image::Frame::new(buffer)])))
 }
 
 struct SettingsView {
@@ -167,6 +252,10 @@ struct SettingsView {
     page: SettingsPage,
     search: Entity<InputState>,
     ratio: Entity<InputState>,
+    edge_softness: Entity<SliderState>,
+    edge_blend: Entity<SliderState>,
+    blur: Entity<SliderState>,
+    preview: PreviewState,
     search_query: String,
     suppress_ratio_events: bool,
     start_with_windows: bool,
@@ -189,6 +278,24 @@ impl SettingsView {
         let ratio = cx.new(|cx| {
             InputState::new(window, cx)
                 .default_value(format!("{}:{}", initial_ratio.width, initial_ratio.height))
+        });
+        let initial_effect = effect_on_page(
+            &data.settings,
+            SettingsPage::Program,
+            selected_profile.as_deref(),
+        );
+        let edge_softness = cx.new(|_| strength_slider(initial_effect.edge_softness));
+        let edge_blend = cx.new(|_| strength_slider(initial_effect.edge_blend));
+        let blur = cx.new(|_| strength_slider(initial_effect.blur));
+        let slider_subscriptions = [&edge_softness, &edge_blend, &blur].map(|slider| {
+            cx.subscribe_in(
+                slider,
+                window,
+                |this, _, event: &SliderEvent, window, cx| match event {
+                    SliderEvent::Change(_) => cx.notify(),
+                    SliderEvent::Release(_) => this.save_effect_sliders(window, cx),
+                },
+            )
         });
 
         let search_subscription = cx.subscribe_in(&search, window, |this, input, event, _, cx| {
@@ -228,11 +335,21 @@ impl SettingsView {
             page: SettingsPage::Program,
             search,
             ratio,
+            edge_softness,
+            edge_blend,
+            blur,
+            preview: PreviewState {
+                screen_size: primary_screen_size(),
+                ..PreviewState::default()
+            },
             search_query: String::new(),
             suppress_ratio_events: false,
             start_with_windows: startup::is_enabled(),
             error: None,
-            _subscriptions: vec![search_subscription, ratio_subscription],
+            _subscriptions: [search_subscription, ratio_subscription]
+                .into_iter()
+                .chain(slider_subscriptions)
+                .collect(),
         }
     }
 
@@ -261,6 +378,185 @@ impl SettingsView {
             .map(|ratio| format!("{}:{}", ratio.width, ratio.height))
             .unwrap_or_default();
         self.set_ratio_text(&value, window, cx);
+        self.sync_effect_sliders(window, cx);
+    }
+
+    fn current_effect(&self) -> EffectSettings {
+        effect_on_page(&self.settings, self.page, self.selected_profile.as_deref())
+    }
+
+    /// What the preview should show: the page's look, with sliders mid-drag taking effect live.
+    fn preview_target(&self, cx: &App) -> Option<(AspectRatio, EffectSettings)> {
+        let aspect_ratio = self.current_ratio()?;
+        let mut effect = self.current_effect();
+        if self.effect_editable() {
+            effect.edge_softness = slider_strength(self.edge_softness.read(cx));
+            effect.edge_blend = slider_strength(self.edge_blend.read(cx));
+            effect.blur = slider_strength(self.blur.read(cx));
+        }
+        Some((aspect_ratio, effect))
+    }
+
+    /// Starts a render when the preview is out of date. Only one runs at a time; when it finishes,
+    /// the view re-renders and this catches up with anything that changed meanwhile.
+    fn refresh_preview(&mut self, cx: &mut Context<Self>) {
+        if self.preview.busy {
+            return;
+        }
+        let Some(target) = self.preview_target(cx) else {
+            return;
+        };
+        if self.preview.rendered == Some(target) {
+            return;
+        }
+        let Some(screen_size) = self.preview.screen_size else {
+            self.preview.error = Some("Could not read the screen size.".into());
+            return;
+        };
+        self.preview.busy = true;
+        self.preview.rendered = Some(target);
+        let renderer = self.preview.renderer.clone();
+        cx.spawn(async move |view, cx| {
+            let result = cx
+                .background_spawn(async move { render_preview(&renderer, screen_size, target) })
+                .await;
+            let _ = view.update(cx, |this, cx| {
+                this.preview.busy = false;
+                match result {
+                    Ok(image) => {
+                        if let Some(previous) = this.preview.image.replace(image) {
+                            cx.drop_image(previous, None);
+                        }
+                        this.preview.error = None;
+                    }
+                    Err(error) => this.preview.error = Some(error),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn render_preview(&self) -> impl IntoElement {
+        let (screen_width, screen_height) = self.preview.screen_size.unwrap_or((16, 9));
+        let aspect = screen_width as f32 / screen_height as f32;
+        let height = (680.0 / aspect).clamp(140.0, 360.0);
+        let frame = div()
+            .flex()
+            .items_center()
+            .justify_center()
+            .w(px(height * aspect))
+            .max_w_full()
+            .h(px(height))
+            .rounded_md()
+            .overflow_hidden()
+            .bg(rgb(0x000000))
+            .border_1()
+            .border_color(rgb(0x3a3a3a));
+        match (&self.preview.image, &self.preview.error) {
+            (_, Some(error)) => frame
+                .text_sm()
+                .text_color(rgb(0xa6a6a6))
+                .child(format!("Preview unavailable: {error}")),
+            (Some(image), None) => frame.child(
+                img(image.clone())
+                    .size_full()
+                    .object_fit(ObjectFit::Contain),
+            ),
+            (None, None) => frame
+                .text_sm()
+                .text_color(rgb(0xa6a6a6))
+                .child("Rendering preview…"),
+        }
+    }
+
+    /// Whether the effect controls on this page are editable.
+    fn effect_editable(&self) -> bool {
+        match self.page {
+            SettingsPage::Global => true,
+            SettingsPage::Program => self
+                .selected_profile
+                .as_deref()
+                .and_then(|path| self.settings.profile_for(path))
+                .is_some_and(|profile| profile.effect.is_some()),
+            SettingsPage::Add => false,
+        }
+    }
+
+    /// The look the Look card's reset button restores: the built-in defaults on the Global page,
+    /// or the global look for an app with its own.
+    fn reset_effect_target(&self) -> Option<EffectSettings> {
+        match self.page {
+            SettingsPage::Global => Some(EffectSettings::default()),
+            SettingsPage::Program => self
+                .effect_editable()
+                .then_some(self.settings.default_effect),
+            SettingsPage::Add => None,
+        }
+    }
+
+    fn sync_effect_sliders(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let effect = self.current_effect();
+        for (slider, value) in [
+            (&self.edge_softness, effect.edge_softness),
+            (&self.edge_blend, effect.edge_blend),
+            (&self.blur, effect.blur),
+        ] {
+            slider.update(cx, |slider, cx| slider.set_value(value as f32, window, cx));
+        }
+    }
+
+    fn update_effect(
+        &mut self,
+        change: impl FnOnce(&mut EffectSettings),
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(updated) = with_effect_change(
+            &self.settings,
+            self.page,
+            self.selected_profile.as_deref(),
+            change,
+        ) {
+            self.save_settings(updated, cx);
+        }
+        self.sync_effect_sliders(window, cx);
+        cx.notify();
+    }
+
+    fn save_effect_sliders(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let edge_softness = slider_strength(self.edge_softness.read(cx));
+        let edge_blend = slider_strength(self.edge_blend.read(cx));
+        let blur = slider_strength(self.blur.read(cx));
+        self.update_effect(
+            |effect| {
+                effect.edge_softness = edge_softness;
+                effect.edge_blend = edge_blend;
+                effect.blur = blur;
+            },
+            window,
+            cx,
+        );
+    }
+
+    fn set_custom_effect(&mut self, custom: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(path) = self.selected_profile.clone() else {
+            return;
+        };
+        let default_effect = self.settings.default_effect;
+        self.update_settings(
+            |settings| {
+                if let Some(profile) = settings
+                    .profiles
+                    .iter_mut()
+                    .find(|profile| paths_match(&profile.executable, &path))
+                {
+                    profile.effect = custom.then_some(default_effect);
+                }
+            },
+            cx,
+        );
+        self.sync_effect_sliders(window, cx);
     }
 
     fn restore_ratio(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -397,6 +693,7 @@ impl SettingsView {
         updated.upsert(AppProfile {
             executable: executable.clone(),
             aspect_ratio: self.settings.default_aspect_ratio,
+            effect: None,
         });
         if let Err(error) = updated.save(&self.settings_path) {
             self.error = Some(format!("Could not save settings: {error}"));
@@ -740,6 +1037,7 @@ impl SettingsView {
             return div()
                 .flex()
                 .flex_1()
+                .flex_shrink_0()
                 .items_center()
                 .justify_center()
                 .text_color(rgb(0xb0b0b0))
@@ -751,6 +1049,7 @@ impl SettingsView {
             .flex()
             .flex_col()
             .flex_1()
+            .flex_shrink_0()
             .gap_6()
             .p_8()
             .child(
@@ -765,6 +1064,7 @@ impl SettingsView {
             .child(div().text_sm().text_color(rgb(0xb0b0b0)).child(
                 "The selected content area stays clear; ambient blur fills the space outside it.",
             ))
+            .child(self.render_effect_card(cx))
             .child(
                 Button::new("remove-profile")
                     .label("Remove app")
@@ -778,6 +1078,7 @@ impl SettingsView {
             .flex()
             .flex_col()
             .flex_1()
+            .flex_shrink_0()
             .gap_6()
             .p_8()
             .child(
@@ -802,6 +1103,7 @@ impl SettingsView {
             .child(div().text_sm().text_color(rgb(0xb0b0b0)).child(
                 "New profiles start with this ratio. Existing app settings are not changed.",
             ))
+            .child(self.render_effect_card(cx))
             .child(
                 toggle_card(
                     "Always on",
@@ -811,7 +1113,7 @@ impl SettingsView {
                     Switch::new("always-on")
                         .checked(self.settings.always_on)
                         .on_click(cx.listener(|this, checked: &bool, _, cx| {
-                            this.update_flag(|settings| settings.always_on = *checked, cx);
+                            this.update_settings(|settings| settings.always_on = *checked, cx);
                         })),
                 ),
             )
@@ -824,7 +1126,7 @@ impl SettingsView {
                     Switch::new("show-in-screenshots")
                         .checked(self.settings.show_in_screenshots)
                         .on_click(cx.listener(|this, checked: &bool, _, cx| {
-                            this.update_flag(
+                            this.update_settings(
                                 |settings| settings.show_in_screenshots = *checked,
                                 cx,
                             );
@@ -846,9 +1148,13 @@ impl SettingsView {
             )
     }
 
-    fn update_flag(&mut self, change: impl FnOnce(&mut AppSettings), cx: &mut Context<Self>) {
+    fn update_settings(&mut self, change: impl FnOnce(&mut AppSettings), cx: &mut Context<Self>) {
         let mut updated = self.settings.clone();
         change(&mut updated);
+        self.save_settings(updated, cx);
+    }
+
+    fn save_settings(&mut self, updated: AppSettings, cx: &mut Context<Self>) {
         match updated.save(&self.settings_path) {
             Ok(()) => {
                 self.settings = updated;
@@ -888,6 +1194,7 @@ impl SettingsView {
             .flex()
             .flex_col()
             .flex_1()
+            .flex_shrink_0()
             .gap_6()
             .p_8()
             .child(
@@ -949,6 +1256,129 @@ impl SettingsView {
                                 cx.listener(|this, _, window, cx| this.add_candidate(window, cx)),
                             ),
                     ),
+            )
+    }
+
+    fn render_effect_card(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let editable = self.effect_editable();
+        let effect = self.current_effect();
+        let custom_row = (self.page == SettingsPage::Program).then(|| {
+            setting_row(
+                "Custom look for this app",
+                "When off, this app follows the look set in Global settings.",
+            )
+            .child(Switch::new("custom-effect").checked(editable).on_click(
+                cx.listener(|this, checked: &bool, window, cx| {
+                    this.set_custom_effect(*checked, window, cx);
+                }),
+            ))
+        });
+        let slider_row =
+            |title: &'static str, description: &'static str, slider: &Entity<SliderState>| {
+                let value = slider_strength(slider.read(cx));
+                setting_row(title, description).child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_3()
+                        .w(px(230.))
+                        .flex_shrink_0()
+                        .child(
+                            div().flex_1().child(
+                                Slider::new(slider)
+                                    .accessibility_label(title)
+                                    .disabled(!editable),
+                            ),
+                        )
+                        .child(
+                            div()
+                                .w(px(40.))
+                                .text_right()
+                                .text_sm()
+                                .text_color(rgb(if editable { 0xe5e5e5 } else { 0x808080 }))
+                                .child(format!("{value}%")),
+                        ),
+                )
+            };
+        let resolution_buttons = BlurResolution::ALL.map(|resolution| {
+            let button = Button::new(format!("blur-resolution-{}", resolution.label()))
+                .label(resolution.label())
+                .disabled(!editable)
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    this.update_effect(|effect| effect.resolution = resolution, window, cx);
+                }));
+            if resolution == effect.resolution {
+                button.primary()
+            } else {
+                button.ghost()
+            }
+        });
+
+        let reset_target = self.reset_effect_target();
+        let reset_button = Button::new("reset-look")
+            .label(if self.page == SettingsPage::Global {
+                "Reset to defaults"
+            } else {
+                "Reset to global"
+            })
+            .ghost()
+            .small()
+            .disabled(reset_target.is_none_or(|target| target == effect))
+            .on_click(cx.listener(move |this, _, window, cx| {
+                if let Some(target) = reset_target {
+                    this.update_effect(|effect| *effect = target, window, cx);
+                }
+            }));
+
+        div()
+            .flex()
+            .flex_col()
+            .gap_4()
+            .p_5()
+            .rounded_lg()
+            .bg(rgb(0x252525))
+            .border_1()
+            .border_color(rgb(0x383838))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .pb_3()
+                    .border_b_1()
+                    .border_color(rgb(0x3a3a3a))
+                    .child(div().text_xs().text_color(rgb(0xa6a6a6)).child("LOOK"))
+                    .child(reset_button),
+            )
+            .child(div().flex().justify_center().child(self.render_preview()))
+            .children(custom_row)
+            .child(slider_row(
+                "Edge softness",
+                "Softens the outermost few pixels of the picture so its edge isn't razor sharp.",
+                &self.edge_softness,
+            ))
+            .child(slider_row(
+                "Edge blend",
+                "Blurs the picture gradually into the bars so there's no hard line.",
+                &self.edge_blend,
+            ))
+            .child(slider_row(
+                "Blur strength",
+                "How far colours spread into the bars.",
+                &self.blur,
+            ))
+            .child(
+                setting_row(
+                    "Blur resolution",
+                    "Lower is lighter on the GPU and smoother; higher keeps more detail.",
+                )
+                .child(
+                    div()
+                        .flex()
+                        .gap_1()
+                        .flex_shrink_0()
+                        .children(resolution_buttons),
+                ),
             )
     }
 
@@ -1015,8 +1445,17 @@ impl SettingsView {
 
 impl Render for SettingsView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        // Fill the remaining pane height so `flex_1` / centering inside each page works.
-        let details_pane = || div().flex().flex_col().flex_1().min_h_0();
+        self.refresh_preview(cx);
+        // Fill the remaining pane height so `flex_1` / centering inside each page works, and
+        // scroll when a page is taller than the window.
+        let details_pane = || {
+            div()
+                .flex()
+                .flex_col()
+                .flex_1()
+                .min_h_0()
+                .overflow_y_scrollbar()
+        };
         let details = match self.page {
             SettingsPage::Program => details_pane().child(self.render_profile_details(cx)),
             SettingsPage::Global => details_pane().child(self.render_global_details(cx)),
@@ -1046,6 +1485,19 @@ impl Render for SettingsView {
                     ),
             )
     }
+}
+
+/// A title and description on the left, with room for a control on the right.
+fn setting_row(title: &'static str, description: &'static str) -> gpui_kit::Div {
+    div().flex().items_center().justify_between().gap_5().child(
+        div()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .min_w_0()
+            .child(div().text_sm().text_color(rgb(0xe5e5e5)).child(title))
+            .child(div().text_xs().text_color(rgb(0xa6a6a6)).child(description)),
+    )
 }
 
 fn toggle_card(title: &'static str, description: &'static str) -> gpui_kit::Div {
@@ -1142,6 +1594,7 @@ mod tests {
         settings.upsert(AppProfile {
             executable: executable.clone(),
             aspect_ratio: AspectRatio::new(16, 9).unwrap(),
+            effect: None,
         });
 
         let updated =
@@ -1158,6 +1611,7 @@ mod tests {
         settings.upsert(AppProfile {
             executable: executable.clone(),
             aspect_ratio: AspectRatio::new(16, 9).unwrap(),
+            effect: None,
         });
 
         let updated = updated_settings(&settings, SettingsPage::Global, None, "16:10").unwrap();
@@ -1176,5 +1630,95 @@ mod tests {
         assert!(updated_settings(&settings, SettingsPage::Global, None, "invalid").is_none());
         assert!(updated_settings(&settings, SettingsPage::Program, None, "21:9").is_none());
         assert!(updated_settings(&settings, SettingsPage::Add, None, "21:9").is_none());
+    }
+
+    #[test]
+    fn profile_ratio_edits_keep_a_custom_effect() {
+        let executable = PathBuf::from(r"C:\Games\Example.exe");
+        let custom = EffectSettings {
+            edge_blend: 60,
+            ..EffectSettings::default()
+        };
+        let mut settings = AppSettings::default();
+        settings.upsert(AppProfile {
+            executable: executable.clone(),
+            aspect_ratio: AspectRatio::new(16, 9).unwrap(),
+            effect: Some(custom),
+        });
+
+        let updated =
+            updated_settings(&settings, SettingsPage::Program, Some(&executable), "4:3").unwrap();
+
+        assert_eq!(
+            updated.profile_for(&executable).unwrap().effect,
+            Some(custom)
+        );
+    }
+
+    #[test]
+    fn resetting_a_custom_look_copies_the_global_one_and_keeps_it_custom() {
+        let executable = PathBuf::from(r"C:\Games\Example.exe");
+        let mut settings = AppSettings {
+            default_effect: EffectSettings {
+                edge_blend: 40,
+                ..EffectSettings::default()
+            },
+            ..AppSettings::default()
+        };
+        settings.upsert(AppProfile {
+            executable: executable.clone(),
+            aspect_ratio: AspectRatio::new(16, 9).unwrap(),
+            effect: Some(EffectSettings {
+                blur: 90,
+                ..EffectSettings::default()
+            }),
+        });
+        let global = settings.default_effect;
+
+        let reset = with_effect_change(
+            &settings,
+            SettingsPage::Program,
+            Some(&executable),
+            |effect| *effect = global,
+        )
+        .unwrap();
+
+        assert_eq!(reset.profile_for(&executable).unwrap().effect, Some(global));
+        assert_eq!(reset.default_effect, global);
+    }
+
+    #[test]
+    fn effect_edits_target_the_page_and_skip_profiles_that_follow_global() {
+        let executable = PathBuf::from(r"C:\Games\Example.exe");
+        let mut settings = AppSettings::default();
+        settings.upsert(AppProfile {
+            executable: executable.clone(),
+            aspect_ratio: AspectRatio::new(16, 9).unwrap(),
+            effect: None,
+        });
+        let soften = |effect: &mut EffectSettings| effect.edge_blend = 50;
+
+        let global = with_effect_change(&settings, SettingsPage::Global, None, soften).unwrap();
+        assert_eq!(global.default_effect.edge_blend, 50);
+        assert_eq!(global.profile_for(&executable).unwrap().effect, None);
+        assert_eq!(
+            effect_on_page(&global, SettingsPage::Program, Some(&executable)),
+            global.default_effect
+        );
+
+        assert!(
+            with_effect_change(&settings, SettingsPage::Program, Some(&executable), soften)
+                .is_none()
+        );
+
+        settings.profiles[0].effect = Some(EffectSettings::default());
+        let program =
+            with_effect_change(&settings, SettingsPage::Program, Some(&executable), soften)
+                .unwrap();
+        assert_eq!(program.default_effect, settings.default_effect);
+        assert_eq!(
+            effect_on_page(&program, SettingsPage::Program, Some(&executable)).edge_blend,
+            50
+        );
     }
 }
