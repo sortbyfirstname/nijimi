@@ -15,6 +15,7 @@ cbuffer SceneInfo : register(b0)
     float edgeBlend;
     float downsample;
     float edgeInset;
+    float glowDownsample;
 };
 
 struct VertexOutput
@@ -263,7 +264,7 @@ float4 blendEdge(float2 uv, float4 glow, bool inside)
     float progress = saturate((distance - edgeInset) / edgeBlend);
     if (progress >= 1.0)
         return glow;
-    float radius = lerp(edgeRadius, blurSigma * downsample, progress);
+    float radius = lerp(edgeRadius, blurSigma * glowDownsample, progress);
     float4 color = float4(blurAt(uv, radius), 1.0);
     return lerp(color, glow, smoothstep(0.0, 1.0, progress));
 }

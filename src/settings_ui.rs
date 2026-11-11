@@ -1109,7 +1109,7 @@ impl SettingsView {
             .child(
                 toggle_card(
                     "Frame rate",
-                    "How often the effect updates. Higher is smoother but uses more GPU. Match display follows your refresh rate.",
+                    "How often the effect updates. 60 is smoother; 30 uses half the GPU time.",
                 )
                 .child(
                     div()

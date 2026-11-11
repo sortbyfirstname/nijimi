@@ -57,38 +57,34 @@ pub enum FrameRate {
     #[default]
     Thirty,
     Sixty,
-    /// The primary display's refresh rate.
-    Match,
 }
 
 impl FrameRate {
-    pub const ALL: [Self; 3] = [Self::Thirty, Self::Sixty, Self::Match];
+    pub const ALL: [Self; 2] = [Self::Thirty, Self::Sixty];
 
     pub fn label(self) -> &'static str {
         match self {
             Self::Thirty => "30",
             Self::Sixty => "60",
-            Self::Match => "Match display",
         }
     }
 
-    pub fn fps(self, refresh_rate: u32) -> u32 {
+    pub fn fps(self) -> u32 {
         match self {
             Self::Thirty => 30,
             Self::Sixty => 60,
-            Self::Match => refresh_rate.max(1),
         }
     }
 
     fn key(self) -> &'static str {
-        match self {
-            Self::Thirty => "30",
-            Self::Sixty => "60",
-            Self::Match => "match",
-        }
+        self.label()
     }
 
     fn from_key(key: &str) -> Option<Self> {
+        // Saved by earlier builds, which could match the display's refresh rate.
+        if key == "match" {
+            return Some(Self::Sixty);
+        }
         Self::ALL.into_iter().find(|rate| rate.key() == key)
     }
 }
@@ -935,13 +931,13 @@ mod tests {
         for (line, rate) in [
             ("@frame_rate|30\n", FrameRate::Thirty),
             ("@frame_rate|60\n", FrameRate::Sixty),
-            ("@frame_rate|match\n", FrameRate::Match),
+            ("@frame_rate|match\n", FrameRate::Sixty),
         ] {
             assert_eq!(AppSettings::parse(line).unwrap().frame_rate, rate);
         }
         assert!(AppSettings::parse("@frame_rate|144\n").is_err());
-        assert_eq!(FrameRate::Sixty.fps(165), 60);
-        assert_eq!(FrameRate::Match.fps(165), 165);
+        assert_eq!(FrameRate::Thirty.fps(), 30);
+        assert_eq!(FrameRate::Sixty.fps(), 60);
 
         let unique = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -952,13 +948,13 @@ mod tests {
             std::process::id()
         ));
         let settings = AppSettings {
-            frame_rate: FrameRate::Match,
+            frame_rate: FrameRate::Sixty,
             ..AppSettings::default()
         };
         settings.save(&path).unwrap();
         assert_eq!(
             fs::read_to_string(&path).unwrap(),
-            "@global|21:9\n@frame_rate|match\n"
+            "@global|21:9\n@frame_rate|60\n"
         );
         assert_eq!(AppSettings::load(&path).unwrap(), settings);
         fs::remove_file(path).unwrap();

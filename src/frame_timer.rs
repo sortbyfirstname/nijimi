@@ -1,18 +1,14 @@
-use std::mem::size_of;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use windows::Win32::Foundation::{CloseHandle, E_FAIL, HANDLE, WAIT_OBJECT_0};
-use windows::Win32::Graphics::Gdi::{DEVMODEW, ENUM_CURRENT_SETTINGS, EnumDisplaySettingsW};
 use windows::Win32::System::Threading::{
     CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, CancelWaitableTimer, CreateWaitableTimerExW, INFINITE,
     SetWaitableTimer, TIMER_ALL_ACCESS, WaitForSingleObject,
 };
 use windows::core::{Error, PCWSTR, Result};
-
-const FALLBACK_REFRESH_RATE: u32 = 60;
 
 /// Calls `on_tick` once per frame. `SetTimer` only ticks every ~15.6 ms, which can't hold 60 fps,
 /// so this waits on a high-resolution waitable timer on its own thread. Each tick is one-shot and
@@ -119,22 +115,6 @@ impl Drop for FrameTimer {
     }
 }
 
-/// The primary display's refresh rate in Hz.
-pub fn display_refresh_rate() -> u32 {
-    let mut mode = DEVMODEW {
-        dmSize: size_of::<DEVMODEW>() as u16,
-        ..Default::default()
-    };
-    let found =
-        unsafe { EnumDisplaySettingsW(PCWSTR::null(), ENUM_CURRENT_SETTINGS, &mut mode) }.as_bool();
-    // 0 and 1 mean the hardware's default rate.
-    if found && mode.dmDisplayFrequency > 1 {
-        mode.dmDisplayFrequency
-    } else {
-        FALLBACK_REFRESH_RATE
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::sync::mpsc;
@@ -163,10 +143,5 @@ mod tests {
         timer.stop();
         while receiver.try_recv().is_ok() {}
         assert!(receiver.recv_timeout(Duration::from_millis(100)).is_err());
-    }
-
-    #[test]
-    fn refresh_rate_is_plausible() {
-        assert!((1..=1000).contains(&display_refresh_rate()));
     }
 }

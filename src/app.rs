@@ -49,7 +49,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 use windows::core::{Error, PCWSTR, PWSTR, Result, w};
 
-use crate::frame_timer::{FrameTimer, display_refresh_rate};
+use crate::frame_timer::FrameTimer;
 use crate::geometry::AspectRatio;
 use crate::render::Renderer;
 use crate::settings::{self, ActiveProfile, AppProfile, AppSettings, paths_match};
@@ -561,11 +561,6 @@ unsafe extern "system" fn window_proc(
                 state.frame_timer.stop();
                 sync_tray_status(state);
                 Some(format!("nijimi could not refresh the display:\n{error}"))
-            } else if state.rendering {
-                // The refresh rate may have changed.
-                start_frame_timer(state)
-                    .err()
-                    .map(|error| format!("nijimi could not restart rendering:\n{error}"))
             } else {
                 None
             }
@@ -842,7 +837,7 @@ fn apply_foreground(state: &mut AppState) -> Option<String> {
 }
 
 fn start_frame_timer(state: &mut AppState) -> Result<()> {
-    let fps = state.settings.frame_rate.fps(display_refresh_rate());
+    let fps = state.settings.frame_rate.fps();
     state.frame_timer.start(fps)
 }
 

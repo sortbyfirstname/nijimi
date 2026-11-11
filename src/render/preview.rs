@@ -122,7 +122,11 @@ impl Preview {
     ) -> Result<PreviewImage> {
         let width = (screen_width / SHRINK).max(1);
         let height = (screen_height / SHRINK).max(1);
-        let blur_scale = (effect.resolution.scale() / SHRINK).max(1);
+        let screen_scale = BlurScale::new(effect.resolution.scale());
+        let blur_scale = BlurScale {
+            prefilter: (screen_scale.prefilter / SHRINK).max(1),
+            glow: (screen_scale.glow / SHRINK).max(1),
+        };
         let scene = SceneGeometry::with_blur_scale(width, height, aspect_ratio, effect, blur_scale)
             .ok_or_else(Error::from_win32)?;
         if self
@@ -226,7 +230,7 @@ impl Preview {
 }
 
 impl PreviewTargets {
-    fn new(device: &ID3D11Device, width: u32, height: u32, blur_scale: u32) -> Result<Self> {
+    fn new(device: &ID3D11Device, width: u32, height: u32, blur_scale: BlurScale) -> Result<Self> {
         let screen_desc = D3D11_TEXTURE2D_DESC {
             Width: width,
             Height: height,
