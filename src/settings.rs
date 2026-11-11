@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use crate::geometry::AspectRatio;
 
 const CONFIG_FILE_NAME: &str = "um-bee-ants.ini";
+const APP_DIR_NAME: &str = "um-bee-ants";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AppProfile {
@@ -195,12 +196,55 @@ pub fn filter_app_choices(paths: &[PathBuf], query: &str) -> Vec<PathBuf> {
         .collect()
 }
 
+/// Settings live beside the executable (portable), unless that folder isn't writable (e.g. it's
+/// in Program Files), in which case they go in `%APPDATA%\um-bee-ants`.
 pub fn config_path() -> Result<PathBuf> {
     let executable = std::env::current_exe()?;
-    executable
+    let executable_dir = executable
         .parent()
-        .map(|parent| parent.join(CONFIG_FILE_NAME))
-        .ok_or_else(|| Error::new(ErrorKind::NotFound, "application directory is unavailable"))
+        .ok_or_else(|| Error::new(ErrorKind::NotFound, "application directory is unavailable"))?;
+    let appdata_dir = std::env::var_os("APPDATA").map(|dir| PathBuf::from(dir).join(APP_DIR_NAME));
+    let path = resolve_config_path(executable_dir, appdata_dir.as_deref(), is_dir_writable);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    Ok(path)
+}
+
+/// Picks the settings file, in order: an existing portable file, an existing per-user file,
+/// a new portable file if the executable's folder is writable, otherwise a new per-user file.
+fn resolve_config_path(
+    executable_dir: &Path,
+    appdata_dir: Option<&Path>,
+    is_writable: impl Fn(&Path) -> bool,
+) -> PathBuf {
+    let portable = executable_dir.join(CONFIG_FILE_NAME);
+    if portable.exists() {
+        return portable;
+    }
+    if let Some(appdata_dir) = appdata_dir {
+        let per_user = appdata_dir.join(CONFIG_FILE_NAME);
+        if per_user.exists() || !is_writable(executable_dir) {
+            return per_user;
+        }
+    }
+    portable
+}
+
+fn is_dir_writable(dir: &Path) -> bool {
+    let probe = dir.join(format!(".um-bee-ants-write-test-{}", std::process::id()));
+    match fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&probe)
+    {
+        Ok(file) => {
+            drop(file);
+            let _ = fs::remove_file(&probe);
+            true
+        }
+        Err(_) => false,
+    }
 }
 
 fn invalid_line(line_number: usize) -> Error {
@@ -246,6 +290,55 @@ mod tests {
             config_path().unwrap().file_name().unwrap(),
             CONFIG_FILE_NAME
         );
+    }
+
+    #[test]
+    fn settings_stay_portable_unless_the_executable_folder_is_read_only() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "um-bee-ants-config-path-{}-{unique}",
+            std::process::id()
+        ));
+        let exe_dir = root.join("app");
+        let appdata = root.join("appdata");
+        fs::create_dir_all(&exe_dir).unwrap();
+        fs::create_dir_all(&appdata).unwrap();
+        let portable = exe_dir.join(CONFIG_FILE_NAME);
+        let per_user = appdata.join(CONFIG_FILE_NAME);
+        let writable = |_: &Path| true;
+        let read_only = |_: &Path| false;
+
+        // Fresh portable copy: settings go beside the executable.
+        assert_eq!(
+            resolve_config_path(&exe_dir, Some(&appdata), writable),
+            portable
+        );
+        // Installed somewhere read-only, like Program Files: settings go to %APPDATA%.
+        assert_eq!(
+            resolve_config_path(&exe_dir, Some(&appdata), read_only),
+            per_user
+        );
+        // No %APPDATA%: fall back to beside the executable.
+        assert_eq!(resolve_config_path(&exe_dir, None, read_only), portable);
+        // Existing per-user settings are kept even if the folder later becomes writable.
+        fs::write(&per_user, "").unwrap();
+        assert_eq!(
+            resolve_config_path(&exe_dir, Some(&appdata), writable),
+            per_user
+        );
+        // An existing portable file always wins.
+        fs::write(&portable, "").unwrap();
+        assert_eq!(
+            resolve_config_path(&exe_dir, Some(&appdata), read_only),
+            portable
+        );
+
+        assert!(is_dir_writable(&exe_dir));
+        assert!(!is_dir_writable(&root.join("missing")));
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

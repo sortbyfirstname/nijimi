@@ -3,10 +3,9 @@ use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 use windows::Win32::Foundation::{BOOL, COLORREF, HWND, RECT};
-use windows::Win32::Graphics::Direct3D::Fxc::D3DCompile;
 use windows::Win32::Graphics::Direct3D::{
     D3D_DRIVER_TYPE_UNKNOWN, D3D_FEATURE_LEVEL_10_0, D3D_FEATURE_LEVEL_10_1,
-    D3D_FEATURE_LEVEL_11_0, D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST, ID3DInclude,
+    D3D_FEATURE_LEVEL_11_0, D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST,
 };
 use windows::Win32::Graphics::Direct3D11::{
     D3D11_BIND_CONSTANT_BUFFER, D3D11_BIND_RENDER_TARGET, D3D11_BIND_SHADER_RESOURCE,
@@ -36,11 +35,10 @@ use windows::Win32::UI::WindowsAndMessaging::{
     SWP_NOACTIVATE, SetLayeredWindowAttributes, SetWindowDisplayAffinity, SetWindowPos, ShowWindow,
     WDA_EXCLUDEFROMCAPTURE, WINDOW_DISPLAY_AFFINITY, WINDOW_EX_STYLE, WINDOW_STYLE, WNDCLASSW,
 };
-use windows::core::{Error, Interface, PCSTR, Result, w};
+use windows::core::{Error, Interface, Result, w};
 
 use crate::geometry::{AspectRatio, ScreenRect, ambient_regions, content_bounds, fit_content};
 
-const SHADER: &str = include_str!("ambient.hlsl");
 const WINDOW_CLASS: windows::core::PCWSTR = w!("UmBeeAntsOverlayWindow");
 const BLUR_SCALE: u32 = 4;
 const CAPTURE_RETRY_INITIAL: Duration = Duration::from_millis(250);
@@ -48,13 +46,24 @@ const CAPTURE_RETRY_MAX: Duration = Duration::from_secs(4);
 const INITIAL_FRAME_TIMEOUT_MS: u32 = 100;
 static OVERLAY_CLASS_REGISTERED: OnceLock<()> = OnceLock::new();
 
+/// The overlay window plus, only while a configured app is active, the GPU resources that draw
+/// into it. Keeping the GPU side optional means an idle tray app holds no D3D device, swap chain,
+/// or full-resolution textures.
 pub struct Renderer {
     hwnd: HWND,
     width: u32,
     height: u32,
     enabled: bool,
-    capture_retry: CaptureRetry,
+    aspect_ratio: AspectRatio,
     scene: SceneGeometry,
+    gpu: Option<Gpu>,
+    _window: OverlayWindow,
+}
+
+struct Gpu {
+    width: u32,
+    height: u32,
+    capture_retry: CaptureRetry,
     device: ID3D11Device,
     context: ID3D11DeviceContext,
     output: IDXGIOutput1,
@@ -74,7 +83,6 @@ pub struct Renderer {
     wide_horizontal_view: ID3D11ShaderResourceView,
     wide_blur_render_target: ID3D11RenderTargetView,
     wide_blur_view: ID3D11ShaderResourceView,
-    aspect_ratio: AspectRatio,
     blur_width: u32,
     blur_height: u32,
     captured_texture: ID3D11Texture2D,
@@ -90,7 +98,6 @@ pub struct Renderer {
     composite_pixel_shader: ID3D11PixelShader,
     sampler: ID3D11SamplerState,
     rasterizer: ID3D11RasterizerState,
-    _window: OverlayWindow,
 }
 
 struct OverlayWindow(HWND);
@@ -288,6 +295,108 @@ impl Renderer {
                 SWP_NOACTIVATE,
             )?;
 
+            Ok(Self {
+                hwnd,
+                width,
+                height,
+                enabled: false,
+                aspect_ratio,
+                scene,
+                gpu: None,
+                _window: window,
+            })
+        }
+    }
+
+    pub fn set_aspect_ratio(&mut self, aspect_ratio: AspectRatio) -> Result<()> {
+        self.scene = SceneGeometry::new(self.width, self.height, aspect_ratio)
+            .ok_or_else(Error::from_win32)?;
+        self.aspect_ratio = aspect_ratio;
+        Ok(())
+    }
+
+    pub fn set_enabled(&mut self, enabled: bool) -> Result<()> {
+        if enabled {
+            if self.gpu.is_none() {
+                self.gpu = Some(Gpu::new(self.hwnd, self.width, self.height)?);
+            }
+            let gpu = self.gpu.as_mut().unwrap();
+            if gpu.duplication.is_none() {
+                gpu.duplication = Some(unsafe { gpu.output.DuplicateOutput(&gpu.device)? });
+            }
+            self.enabled = true;
+            let _ = unsafe { ShowWindow(self.hwnd, SW_SHOWNOACTIVATE) };
+        } else {
+            self.enabled = false;
+            // Hide first so the last frame is never visible, then release every GPU resource.
+            // The next activation builds a fresh swap chain that starts cleared.
+            let _ = unsafe { ShowWindow(self.hwnd, SW_HIDE) };
+            self.gpu = None;
+        }
+        Ok(())
+    }
+
+    /// Hides the overlay and stops capturing, but keeps the GPU resources so a quick return to
+    /// the game (e.g. Alt-Tab and back) skips the ~75 ms driver device creation. Call
+    /// [`Self::release_gpu`] once the pause has lasted long enough to be worth freeing them.
+    pub fn pause(&mut self) -> Result<()> {
+        self.enabled = false;
+        let _ = unsafe { ShowWindow(self.hwnd, SW_HIDE) };
+        let Some(gpu) = self.gpu.as_mut() else {
+            return Ok(());
+        };
+        gpu.duplication = None;
+        gpu.has_captured_frame = false;
+        // Clear so the previous game's frame never flashes when the overlay is shown again.
+        if let Err(error) = gpu.clear_overlay() {
+            self.gpu = None;
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    /// Frees all GPU resources if the overlay is not currently active.
+    pub fn release_gpu(&mut self) {
+        if !self.enabled {
+            self.gpu = None;
+        }
+    }
+
+    pub fn refresh(&mut self, enabled: bool) -> Result<()> {
+        let _ = self.set_enabled(false);
+        let mut replacement = Self::with_aspect_ratio(self.aspect_ratio)?;
+        replacement.set_enabled(enabled)?;
+        *self = replacement;
+        Ok(())
+    }
+
+    pub fn render(&mut self) -> Result<()> {
+        if !self.enabled {
+            return Ok(());
+        }
+        let width = unsafe {
+            windows::Win32::UI::WindowsAndMessaging::GetSystemMetrics(
+                windows::Win32::UI::WindowsAndMessaging::SM_CXSCREEN,
+            ) as u32
+        };
+        let height = unsafe {
+            windows::Win32::UI::WindowsAndMessaging::GetSystemMetrics(
+                windows::Win32::UI::WindowsAndMessaging::SM_CYSCREEN,
+            ) as u32
+        };
+        if width != self.width || height != self.height {
+            return self.refresh(true);
+        }
+        match self.gpu.as_mut() {
+            Some(gpu) => gpu.render(&self.scene),
+            None => Ok(()),
+        }
+    }
+}
+
+impl Gpu {
+    fn new(hwnd: HWND, width: u32, height: u32) -> Result<Self> {
+        unsafe {
             let factory: IDXGIFactory2 = CreateDXGIFactory1()?;
             let (adapter, output) = find_primary_output(&factory)?;
             let d3d_adapter: IDXGIAdapter = adapter.cast()?;
@@ -410,14 +519,14 @@ impl Renderer {
             context.ClearRenderTargetView(&render_target, &[0.0, 0.0, 0.0, 0.0]);
             swap_chain.Present(0, DXGI_PRESENT(0)).ok()?;
             let vertex_shader = create_vertex_shader(&device)?;
-            let prepare_pixel_shader = create_pixel_shader(&device, b"PSPrepare\0")?;
-            let horizontal_pixel_shader = create_pixel_shader(&device, b"PSBlurHorizontal\0")?;
-            let vertical_pixel_shader = create_pixel_shader(&device, b"PSBlurVertical\0")?;
+            let prepare_pixel_shader = create_pixel_shader(&device, PS_PREPARE)?;
+            let horizontal_pixel_shader = create_pixel_shader(&device, PS_BLUR_HORIZONTAL)?;
+            let vertical_pixel_shader = create_pixel_shader(&device, PS_BLUR_VERTICAL)?;
             let wide_horizontal_pixel_shader =
-                create_pixel_shader(&device, b"PSBlurWideHorizontal\0")?;
-            let wide_vertical_pixel_shader = create_pixel_shader(&device, b"PSBlurWideVertical\0")?;
-            let blur_pixel_shader = create_pixel_shader(&device, b"PSBlur\0")?;
-            let composite_pixel_shader = create_pixel_shader(&device, b"PSComposite\0")?;
+                create_pixel_shader(&device, PS_BLUR_WIDE_HORIZONTAL)?;
+            let wide_vertical_pixel_shader = create_pixel_shader(&device, PS_BLUR_WIDE_VERTICAL)?;
+            let blur_pixel_shader = create_pixel_shader(&device, PS_BLUR)?;
+            let composite_pixel_shader = create_pixel_shader(&device, PS_COMPOSITE)?;
             let sampler_desc = D3D11_SAMPLER_DESC {
                 Filter: D3D11_FILTER_MIN_MAG_MIP_LINEAR,
                 AddressU: D3D11_TEXTURE_ADDRESS_CLAMP,
@@ -449,18 +558,14 @@ impl Renderer {
             device.CreateRasterizerState(&rasterizer_desc, Some(&mut rasterizer))?;
             let rasterizer = rasterizer.ok_or_else(Error::from_win32)?;
 
-            let renderer = Self {
-                hwnd,
+            Ok(Self {
                 width,
                 height,
-                enabled: false,
-                aspect_ratio,
                 device,
                 context,
                 output,
                 duplication: None,
                 capture_retry: CaptureRetry::default(),
-                scene,
                 swap_chain,
                 _target: target,
                 _composition: composition,
@@ -491,62 +596,11 @@ impl Renderer {
                 composite_pixel_shader,
                 sampler,
                 rasterizer,
-                _window: window,
-            };
-            Ok(renderer)
+            })
         }
     }
 
-    pub fn set_aspect_ratio(&mut self, aspect_ratio: AspectRatio) -> Result<()> {
-        self.scene = SceneGeometry::new(self.width, self.height, aspect_ratio)
-            .ok_or_else(Error::from_win32)?;
-        self.aspect_ratio = aspect_ratio;
-        Ok(())
-    }
-
-    pub fn set_enabled(&mut self, enabled: bool) -> Result<()> {
-        if enabled {
-            if self.duplication.is_none() {
-                self.duplication = Some(unsafe { self.output.DuplicateOutput(&self.device)? });
-            }
-            self.enabled = true;
-            let _ = unsafe { ShowWindow(self.hwnd, SW_SHOWNOACTIVATE) };
-        } else {
-            self.enabled = false;
-            self.duplication = None;
-            self.has_captured_frame = false;
-            let clear_result = self.clear_overlay();
-            let _ = unsafe { ShowWindow(self.hwnd, SW_HIDE) };
-            clear_result?;
-        }
-        Ok(())
-    }
-
-    pub fn refresh(&mut self, enabled: bool) -> Result<()> {
-        let _ = self.set_enabled(false);
-        let mut replacement = Self::with_aspect_ratio(self.aspect_ratio)?;
-        replacement.set_enabled(enabled)?;
-        *self = replacement;
-        Ok(())
-    }
-
-    pub fn render(&mut self) -> Result<()> {
-        if !self.enabled {
-            return Ok(());
-        }
-        let width = unsafe {
-            windows::Win32::UI::WindowsAndMessaging::GetSystemMetrics(
-                windows::Win32::UI::WindowsAndMessaging::SM_CXSCREEN,
-            ) as u32
-        };
-        let height = unsafe {
-            windows::Win32::UI::WindowsAndMessaging::GetSystemMetrics(
-                windows::Win32::UI::WindowsAndMessaging::SM_CYSCREEN,
-            ) as u32
-        };
-        if width != self.width || height != self.height {
-            return self.refresh(true);
-        }
+    fn render(&mut self, scene: &SceneGeometry) -> Result<()> {
         if self.duplication.is_none() {
             if !self.capture_retry.is_ready() {
                 return Ok(());
@@ -574,7 +628,7 @@ impl Renderer {
         } {
             if error.code() == DXGI_ERROR_WAIT_TIMEOUT {
                 return if self.has_captured_frame {
-                    unsafe { self.draw(&self.captured_view) }
+                    unsafe { self.draw(scene, &self.captured_view) }
                 } else {
                     Ok(())
                 };
@@ -594,16 +648,16 @@ impl Renderer {
         let release_result = unsafe { duplication.ReleaseFrame() };
         frame_result?;
         release_result?;
-        unsafe { self.draw(&self.captured_view) }
+        unsafe { self.draw(scene, &self.captured_view) }
     }
 
-    unsafe fn draw(&self, source: &ID3D11ShaderResourceView) -> Result<()> {
+    unsafe fn draw(&self, scene: &SceneGeometry, source: &ID3D11ShaderResourceView) -> Result<()> {
         unsafe {
             draw_ambient(AmbientPass {
                 context: &self.context,
                 render_target: &self.render_target,
                 scene_buffer: &self.scene_buffer,
-                scene: &self.scene,
+                scene,
                 blur_render_target: &self.blur_render_target,
                 blur_view: &self.blur_view,
                 prefilter_render_target: &self.prefilter_render_target,
@@ -895,56 +949,34 @@ fn find_primary_output(factory: &IDXGIFactory2) -> Result<(IDXGIAdapter1, IDXGIO
     Err(Error::from_win32())
 }
 
-unsafe fn compile_shader(entry: &'static [u8], target: &'static [u8]) -> Result<Vec<u8>> {
-    let mut blob = None;
-    let mut errors = None;
-    unsafe {
-        if let Err(error) = D3DCompile(
-            SHADER.as_ptr().cast(),
-            SHADER.len(),
-            PCSTR::null(),
-            None,
-            None::<&ID3DInclude>,
-            PCSTR(entry.as_ptr()),
-            PCSTR(target.as_ptr()),
-            0,
-            0,
-            &mut blob,
-            Some(&mut errors),
-        ) {
-            if let Some(errors) = errors {
-                let message = std::slice::from_raw_parts(
-                    errors.GetBufferPointer().cast::<u8>(),
-                    errors.GetBufferSize(),
-                );
-                eprintln!("{}", String::from_utf8_lossy(message));
-            }
-            return Err(error);
-        }
-        let blob = blob.ok_or_else(Error::from_win32)?;
-        let bytes =
-            std::slice::from_raw_parts(blob.GetBufferPointer().cast::<u8>(), blob.GetBufferSize());
-        Ok(bytes.to_vec())
-    }
+/// Shader bytecode compiled from `ambient.hlsl` by `build.rs`.
+macro_rules! shader_bytecode {
+    ($entry:literal) => {
+        include_bytes!(concat!(env!("OUT_DIR"), "/", $entry, ".cso"))
+    };
 }
 
+const VS_MAIN: &[u8] = shader_bytecode!("VSMain");
+const PS_PREPARE: &[u8] = shader_bytecode!("PSPrepare");
+const PS_BLUR_HORIZONTAL: &[u8] = shader_bytecode!("PSBlurHorizontal");
+const PS_BLUR_VERTICAL: &[u8] = shader_bytecode!("PSBlurVertical");
+const PS_BLUR_WIDE_HORIZONTAL: &[u8] = shader_bytecode!("PSBlurWideHorizontal");
+const PS_BLUR_WIDE_VERTICAL: &[u8] = shader_bytecode!("PSBlurWideVertical");
+const PS_BLUR: &[u8] = shader_bytecode!("PSBlur");
+const PS_COMPOSITE: &[u8] = shader_bytecode!("PSComposite");
+
 unsafe fn create_vertex_shader(device: &ID3D11Device) -> Result<ID3D11VertexShader> {
-    let bytes = unsafe { compile_shader(b"VSMain\0", b"vs_4_0\0")? };
     let mut shader = None;
     unsafe {
-        device.CreateVertexShader(&bytes, None::<&ID3D11ClassLinkage>, Some(&mut shader))?;
+        device.CreateVertexShader(VS_MAIN, None::<&ID3D11ClassLinkage>, Some(&mut shader))?;
     }
     shader.ok_or_else(Error::from_win32)
 }
 
-unsafe fn create_pixel_shader(
-    device: &ID3D11Device,
-    entry: &'static [u8],
-) -> Result<ID3D11PixelShader> {
-    let bytes = unsafe { compile_shader(entry, b"ps_4_0\0")? };
+unsafe fn create_pixel_shader(device: &ID3D11Device, bytecode: &[u8]) -> Result<ID3D11PixelShader> {
     let mut shader = None;
     unsafe {
-        device.CreatePixelShader(&bytes, None::<&ID3D11ClassLinkage>, Some(&mut shader))?;
+        device.CreatePixelShader(bytecode, None::<&ID3D11ClassLinkage>, Some(&mut shader))?;
     }
     shader.ok_or_else(Error::from_win32)
 }
@@ -1191,14 +1223,14 @@ mod tests {
             device.CreateRasterizerState(&rasterizer_desc, Some(&mut rasterizer))?;
             let rasterizer = rasterizer.ok_or_else(Error::from_win32)?;
             let vertex_shader = create_vertex_shader(&device)?;
-            let prepare_pixel_shader = create_pixel_shader(&device, b"PSPrepare\0")?;
-            let horizontal_pixel_shader = create_pixel_shader(&device, b"PSBlurHorizontal\0")?;
-            let vertical_pixel_shader = create_pixel_shader(&device, b"PSBlurVertical\0")?;
+            let prepare_pixel_shader = create_pixel_shader(&device, PS_PREPARE)?;
+            let horizontal_pixel_shader = create_pixel_shader(&device, PS_BLUR_HORIZONTAL)?;
+            let vertical_pixel_shader = create_pixel_shader(&device, PS_BLUR_VERTICAL)?;
             let wide_horizontal_pixel_shader =
-                create_pixel_shader(&device, b"PSBlurWideHorizontal\0")?;
-            let wide_vertical_pixel_shader = create_pixel_shader(&device, b"PSBlurWideVertical\0")?;
-            let blur_pixel_shader = create_pixel_shader(&device, b"PSBlur\0")?;
-            let composite_pixel_shader = create_pixel_shader(&device, b"PSComposite\0")?;
+                create_pixel_shader(&device, PS_BLUR_WIDE_HORIZONTAL)?;
+            let wide_vertical_pixel_shader = create_pixel_shader(&device, PS_BLUR_WIDE_VERTICAL)?;
+            let blur_pixel_shader = create_pixel_shader(&device, PS_BLUR)?;
+            let composite_pixel_shader = create_pixel_shader(&device, PS_COMPOSITE)?;
 
             draw_ambient(AmbientPass {
                 context: &context,

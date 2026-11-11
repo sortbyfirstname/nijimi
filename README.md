@@ -22,13 +22,14 @@ It's also built to cost your games next to nothing. The whole effect runs on the
 - **Lightweight.** Capture, blur, and compositing all stay on the GPU, and frames are never copied back to the CPU. Nothing renders while you're not playing, and there's no polling: it reacts to Windows events.
 - **Never covers the game.** The centred game area is left untouched; the effect is drawn only outside it.
 - **Click-through.** The overlay never takes focus or intercepts input.
-- **Portable.** A single executable, with settings saved in an INI file next to it. No installer, no service.
+- **Portable.** A single executable, with settings saved in an INI file next to it. No installer, no service. Optionally starts with Windows.
 
 ## Lightweight by design
 
 um•bee•ants exists to make games look better, so it can't be allowed to make them run worse. Every design decision favours staying off the game's critical path:
 
 - **Zero work when idle.** No game in focus means no capture, no rendering, and no timers. The app sleeps until Windows reports a foreground change.
+- **Nothing held when idle.** The graphics device, overlay surfaces, and capture are created only when a configured game comes to the front, and fully released a minute after it leaves (so a quick Alt-Tab and back is instant). Idle, um•bee•ants holds no GPU memory at all.
 - **GPU-only pipeline.** Desktop frames are captured, blurred, and composited entirely in GPU memory. No pixels ever cross to the CPU.
 - **Cheap by construction.** The blur is computed at quarter resolution with separable passes, refreshed about 30 times a second rather than at your monitor's refresh rate, and only drawn outside the game area.
 - **Doesn't touch the game.** No injection, no hooks inside the game's process, no driver. um•bee•ants is a separate click-through window and nothing is ever loaded into the game.
@@ -36,21 +37,35 @@ um•bee•ants exists to make games look better, so it can't be allowed to make
 
 ### Measured
 
-Release build, idle in the tray (no configured game in focus), sampled over 60 seconds on a Ryzen 7 9800X3D with an RTX 5090 at 5120×2160, 165 Hz:
+Release build on a Ryzen 7 9800X3D with an RTX 5090 at 5120×2160, 165 Hz:
 
-| | Idle |
-|---|---|
-| CPU | **≈0.01%** of total CPU (78 ms of CPU time per minute) |
-| GPU usage | **0%** |
-| Memory (working set) | 44 MB |
-| GPU memory | 59 MB |
+| | Idle in the tray | Idle after a game session |
+|---|---|---|
+| CPU | **0 ms** over 60 seconds | **0 ms** |
+| GPU usage | **0%** (no graphics device) | **0%** (no graphics device) |
+| GPU memory | **0 MB** | **0 MB** |
+| Memory | **1.6 MB** | **≈4 MB** |
+| Threads | 1 | 6 |
 
-Active-rendering measurements (the cost while a game is running) are still to come.
+Memory is the private working set, the same figure Task Manager shows in its Memory column. It's slightly higher after a game session because Windows keeps the graphics driver loaded once it's been used. The total working set, which also counts Windows and graphics-driver code that other processes can share, is about 12 MB idle in the tray and about 21 MB after a game session.
+
+Alt-Tab back into a game within a minute and the overlay is back in about **11 ms**. After longer than that, it's ready in about **110 ms**, most of which is the graphics driver setting up a device. Either way, this happens on um•bee•ants' own thread while the game keeps running normally.
+
+While a game is running, measured over 60 seconds of gameplay in Persona 5 Royal with the effect active:
+
+| um•bee•ants while active | Average | 95th percentile |
+|---|---|---|
+| CPU | **0.08%** of total CPU | 0.44% |
+| GPU (3D engine) | **0.51%** | 0.55% |
+| GPU memory | 287 MB | 287 MB |
+| Memory | 17 MB | 17 MB |
+
+For scale, the game itself used 8.5% of the GPU over the same period. After Alt-Tabbing out, um•bee•ants' GPU use dropped to 0% immediately and its GPU memory to 202 MB, then to 0 MB after a minute. GPU cost scales with display resolution and GPU speed, so expect a proportionally higher percentage on slower cards or a lower one at lower resolutions. To measure on your own system, run `scripts/measure-performance.ps1` while playing.
 
 ## Getting started
 
-1. Download or build `um-bee-ants.exe` and put it in a folder you can write to.
-2. Run it. The bee icon appears in the system tray.
+1. Download the latest `um-bee-ants-…-windows-x64.zip` from [Releases](../../releases/latest) (or [build it yourself](#building)) and extract it to a folder you can write to.
+2. Run it. The icon appears in the system tray.
 3. Click the tray icon to open **Settings**, choose **Add app…**, and pick your game from recently used apps, running processes, or **Browse…**.
 4. Pick an aspect ratio. Changes save automatically.
 5. Launch the game. The ambient effect appears in the bars as soon as it's in front.
@@ -62,13 +77,19 @@ Right-click the tray icon for **Settings** and **Exit**.
 - Windows 10 version 2004 or later
 - A Direct3D 11-capable GPU
 
+Nothing else is needed. `um-bee-ants.exe` is fully self-contained and doesn't need the Visual C++ Redistributable or any other runtime.
+
 ## Settings
 
 - **Program settings.** Lists your game profiles. Search by executable name or path, select a profile to change its aspect ratio, or remove it. Supported ratios range from `1:4` to `4:1`; invalid entries are rejected and the previous value is restored.
-- **Global settings.** Sets the default aspect ratio for new profiles (initially `21:9`). Existing profiles keep their own ratios.
+- **Global settings.** Sets the default aspect ratio for new profiles (initially `21:9`); existing profiles keep their own ratios. **Start with Windows** launches um•bee•ants in the tray when you sign in. It's off by default and applies to the copy you turn it on from. If you move the executable, turn it off and on again.
 - **Add app.** Shows apps that were in the foreground while um•bee•ants was running, followed by currently running processes (newest first). The list refreshes when you open it and with the refresh button. Windows may block access to elevated or protected processes.
 
 Settings are stored in `um-bee-ants.ini` beside the executable. To move your setup, copy the executable and the INI file together. To carry settings over from an older build, copy its INI file next to the new executable and rename it to `um-bee-ants.ini`.
+
+If the executable's folder isn't writable (for example, if you put it in `Program Files`), settings are stored in `%APPDATA%\um-bee-ants\um-bee-ants.ini` instead. A settings file beside the executable always takes priority.
+
+Start with Windows uses your per-user startup list (`HKCU\Software\Microsoft\Windows\CurrentVersion\Run`), so it doesn't need admin rights. It also shows up in Task Manager's **Startup apps**, where it can be turned off too.
 
 ## Limitations
 
@@ -105,7 +126,8 @@ The protected rectangle is computed with integer geometry, fitted and centred on
 
 The project's main goal is minimal impact on the game you're playing.
 
-- **Idle.** With no configured game in focus, nothing renders, no render timer runs, and capture resources are released.
+- **Idle.** When the configured game leaves the foreground, rendering and capture stop immediately and the overlay is hidden. The Direct3D device, swap chain, composition objects, and textures are kept for one minute so a quick return is instant, then all released. Only the hidden overlay window remains.
+- **Precompiled shaders.** `build.rs` compiles `src/ambient.hlsl` to bytecode at build time, so the HLSL compiler is never loaded and no shaders are compiled at runtime.
 - **Active.** The render loop runs at about 30 fps, entirely on the GPU, and blurs at reduced resolution.
 - **Recovery.** If capture access is lost (for example on a UAC prompt or a mode switch), the overlay is cleared and capture is retried with a backoff of up to four seconds. Resources are rebuilt after display changes. If rendering fails, it stops rather than retrying on every window switch, and tries again when settings are saved or the display configuration changes.
 - **Process lookup.** If Windows refuses access to a process's path, it's treated as not matching any profile, so the effect stays off.
@@ -131,3 +153,7 @@ The app icon is embedded as a Windows resource from `assets/tresbient.ico`, and 
 ### Tests
 
 `cargo test` covers aspect-ratio geometry (including portrait and odd-sized displays), settings round trips and activation rules, capture retry behaviour, and offscreen Direct3D WARP rendering of the blur passes.
+
+## License
+
+[MIT](LICENSE)

@@ -60,6 +60,10 @@ const EVENT_OBJECT_LOCATIONCHANGE: u32 = 0x800b;
 const EXIT_COMMAND: u32 = 2;
 const SETTINGS_COMMAND: u32 = 3;
 const RENDER_TIMER: usize = 1;
+/// Fires once after the overlay has been paused this long, to free its GPU resources. Keeping
+/// them briefly makes Alt-Tabbing back into a game near-instant.
+const RELEASE_TIMER: usize = 2;
+const RELEASE_AFTER_MS: u32 = 60_000;
 static MAIN_WINDOW: AtomicIsize = AtomicIsize::new(0);
 static FOREGROUND_UPDATE_PENDING: AtomicBool = AtomicBool::new(false);
 static SETTINGS_CLASS_REGISTERED: OnceLock<()> = OnceLock::new();
@@ -468,6 +472,16 @@ unsafe extern "system" fn window_proc(
         }
         return LRESULT(0);
     }
+    if message == WM_TIMER && wparam.0 == RELEASE_TIMER {
+        let state = unsafe { &mut *state_ptr };
+        unsafe {
+            let _ = KillTimer(state.hwnd, RELEASE_TIMER);
+        }
+        if !state.rendering {
+            state.renderer.release_gpu();
+        }
+        return LRESULT(0);
+    }
     if message == WM_TIMER {
         let error = unsafe {
             let state = &mut *state_ptr;
@@ -728,12 +742,16 @@ fn update_foreground(state: &mut AppState) -> Option<String> {
         };
     if !state.enabled || selected.is_none() {
         if state.rendering {
-            let result = state.renderer.set_enabled(false);
+            let result = state.renderer.pause();
             state.rendering = false;
             state.active_executable = None;
             state.active_ratio = None;
             unsafe {
                 let _ = KillTimer(state.hwnd, RENDER_TIMER);
+                if SetTimer(state.hwnd, RELEASE_TIMER, RELEASE_AFTER_MS, None) == 0 {
+                    // No timer means no deferred release, so free everything now.
+                    state.renderer.release_gpu();
+                }
             }
             if let Err(error) = result {
                 return Some(format!("um•bee•ants could not pause rendering:\n{error}"));
@@ -769,6 +787,9 @@ fn update_foreground(state: &mut AppState) -> Option<String> {
         return Some(format!(
             "um•bee•ants could not start its render timer:\n{error}"
         ));
+    }
+    unsafe {
+        let _ = KillTimer(state.hwnd, RELEASE_TIMER);
     }
     state.rendering = true;
     state.active_executable = Some(executable);

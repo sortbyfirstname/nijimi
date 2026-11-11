@@ -8,6 +8,7 @@ use gpui_kit::component::{
     button::{Button, ButtonVariants as _},
     input::{Input, InputEvent, InputState},
     scroll::ScrollableElement as _,
+    switch::Switch,
     theme::{Theme, ThemeMode},
 };
 use gpui_kit::{
@@ -22,7 +23,7 @@ use windows::core::{PCWSTR, w};
 
 use crate::geometry::AspectRatio;
 use crate::settings::{self, AppProfile, AppSettings, paths_match};
-use crate::{app, app_icon};
+use crate::{app, app_icon, startup};
 
 pub const WINDOW_TITLE: &str = "um•bee•ants";
 pub const WINDOW_TITLE_WIDE: &[u16] =
@@ -168,6 +169,7 @@ struct SettingsView {
     ratio: Entity<InputState>,
     search_query: String,
     suppress_ratio_events: bool,
+    start_with_windows: bool,
     error: Option<String>,
     _subscriptions: Vec<Subscription>,
 }
@@ -228,6 +230,7 @@ impl SettingsView {
             ratio,
             search_query: String::new(),
             suppress_ratio_events: false,
+            start_with_windows: startup::is_enabled(),
             error: None,
             _subscriptions: vec![search_subscription, ratio_subscription],
         }
@@ -799,6 +802,59 @@ impl SettingsView {
             .child(div().text_sm().text_color(rgb(0xb0b0b0)).child(
                 "New profiles start with this ratio. Existing app settings are not changed.",
             ))
+            .child(self.render_startup_card(cx))
+    }
+
+    fn render_startup_card(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .flex()
+            .items_center()
+            .justify_between()
+            .gap_5()
+            .p_5()
+            .rounded_lg()
+            .bg(rgb(0x252525))
+            .border_1()
+            .border_color(rgb(0x383838))
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(rgb(0xe5e5e5))
+                            .child("Start with Windows"),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(rgb(0xa6a6a6))
+                            .child("Launch um•bee•ants in the tray when you sign in."),
+                    ),
+            )
+            .child(
+                Switch::new("start-with-windows")
+                    .checked(self.start_with_windows)
+                    .on_click(cx.listener(|this, checked: &bool, _, cx| {
+                        this.set_start_with_windows(*checked, cx);
+                    })),
+            )
+    }
+
+    fn set_start_with_windows(&mut self, enabled: bool, cx: &mut Context<Self>) {
+        match startup::set_enabled(enabled) {
+            Ok(()) => {
+                self.start_with_windows = startup::is_enabled();
+                self.error = None;
+            }
+            Err(error) => {
+                self.start_with_windows = startup::is_enabled();
+                self.error = Some(format!("Could not change Start with Windows: {error}"));
+            }
+        }
+        cx.notify();
     }
 
     fn render_add_details(&self, cx: &mut Context<Self>) -> impl IntoElement {
