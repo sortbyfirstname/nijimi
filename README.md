@@ -107,7 +107,9 @@ Nothing else is needed. `nijimi.exe` is fully self-contained and doesn't need th
 
 ## Settings
 
-- **Program settings.** Lists your game profiles. Search by executable name or path, select a profile to change its aspect ratio, give it its own look instead of the global one, or remove it. Supported ratios range from `1:4` to `4:1`; invalid entries are rejected and the previous value is restored.
+![nijimi's Program settings: the profile list on the left, sorted alphabetically, and the selected game's aspect ratio and look on the right, with a live preview of the effect](assets/screenshots/program-settings-1.png)
+
+- **Program settings.** Lists your game profiles in alphabetical order. Search by executable name or path, select a profile to change its aspect ratio, give it its own look instead of the global one, or remove it. Supported ratios range from `1:4` to `4:1`; invalid entries are rejected and the previous value is restored.
 - **Global settings.** Sets the default aspect ratio for new profiles (initially `21:9`); existing profiles keep their own ratios. The **look** (edge softness, edge blend, blur strength, and blur resolution) set here applies to every profile without its own. **Frame rate** updates the effect 30 (default) or 60 times a second. **Always on** shows the effect whatever app is in front: profiled games still use their own ratio, and everything else uses the default. It's off by default, and while it's on nijimi keeps rendering instead of going idle. **Show in screenshots** lets screenshots and recordings capture the effect; it's off by default, so they normally show plain black bars. **Start with Windows** launches nijimi in the tray when you sign in, without opening Settings. It's off by default and applies to the copy you turn it on from. If you move the executable, turn it off and on again.
 - **Add app.** Shows apps that were in the foreground while nijimi was running, followed by currently running processes (newest first). The list refreshes when you open it and with the refresh button. Windows may block access to elevated or protected processes.
 

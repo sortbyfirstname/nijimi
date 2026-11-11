@@ -267,11 +267,9 @@ struct SettingsView {
 
 impl SettingsView {
     fn new(data: InitialData, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let selected_profile = data
-            .settings
-            .profiles
-            .first()
-            .map(|profile| profile.executable.clone());
+        let selected_profile = settings::sorted_profile_paths(&data.settings.profiles)
+            .into_iter()
+            .next();
         let initial_ratio = selected_profile
             .as_deref()
             .and_then(|path| data.settings.ratio_for(path))
@@ -606,12 +604,7 @@ impl SettingsView {
     }
 
     fn filtered_profiles(&self) -> Vec<PathBuf> {
-        let paths: Vec<PathBuf> = self
-            .settings
-            .profiles
-            .iter()
-            .map(|profile| profile.executable.clone())
-            .collect();
+        let paths = settings::sorted_profile_paths(&self.settings.profiles);
         settings::filter_app_choices(&paths, &self.search_query)
     }
 
@@ -726,11 +719,9 @@ impl SettingsView {
             return;
         }
         self.settings = updated;
-        self.selected_profile = self
-            .settings
-            .profiles
-            .first()
-            .map(|profile| profile.executable.clone());
+        self.selected_profile = settings::sorted_profile_paths(&self.settings.profiles)
+            .into_iter()
+            .next();
         self.error = None;
         self.sync_ratio_text(window, cx);
         app::notify_settings_changed();

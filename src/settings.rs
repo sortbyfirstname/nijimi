@@ -408,6 +408,25 @@ pub fn add_app_choices(
     unique
 }
 
+/// Profile executables sorted by file name, ignoring case, then by full path.
+pub fn sorted_profile_paths(profiles: &[AppProfile]) -> Vec<PathBuf> {
+    let key = |path: &Path| {
+        (
+            path.file_name()
+                .unwrap_or(path.as_os_str())
+                .to_string_lossy()
+                .to_lowercase(),
+            path.to_string_lossy().to_lowercase(),
+        )
+    };
+    let mut paths: Vec<PathBuf> = profiles
+        .iter()
+        .map(|profile| profile.executable.clone())
+        .collect();
+    paths.sort_by_cached_key(|path| key(path));
+    paths
+}
+
 pub fn filter_app_choices(paths: &[PathBuf], query: &str) -> Vec<PathBuf> {
     let query = query.trim().to_lowercase();
     if query.is_empty() {
@@ -737,6 +756,35 @@ mod tests {
                 PathBuf::from(r"G:\Games\Recent.exe"),
                 PathBuf::from(r"D:\Tools\Running.exe"),
             ]
+        );
+    }
+
+    #[test]
+    fn profiles_sort_by_file_name_ignoring_case_then_path() {
+        let profile = |path: &str| AppProfile {
+            executable: PathBuf::from(path),
+            aspect_ratio: AspectRatio::new(16, 9).unwrap(),
+            effect: None,
+        };
+        let profiles = [
+            profile(r"G:\Games\P5R.exe"),
+            profile(r"C:\Games\witcher3.exe"),
+            profile(r"D:\Other\Cairn.exe"),
+            profile(r"C:\Games\Cairn.exe"),
+            profile(r"E:\METAPHOR.exe"),
+            profile(r"F:\Esoteric Ebb.exe"),
+        ];
+        assert_eq!(
+            sorted_profile_paths(&profiles),
+            [
+                r"C:\Games\Cairn.exe",
+                r"D:\Other\Cairn.exe",
+                r"F:\Esoteric Ebb.exe",
+                r"E:\METAPHOR.exe",
+                r"G:\Games\P5R.exe",
+                r"C:\Games\witcher3.exe",
+            ]
+            .map(PathBuf::from)
         );
     }
 
