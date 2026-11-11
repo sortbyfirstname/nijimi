@@ -137,6 +137,7 @@ struct AppState {
     renderer: Renderer,
     /// Only exists while the effect is on or briefly paused, so an idle tray holds no extra thread.
     frame_timer: Option<FrameTimer>,
+    location_hook: Option<(u32, WinEventHook)>,
     /// False after a failure, so it isn't retried and re-reported on every foreground change.
     /// Re-armed when settings are saved or the display changes.
     enabled: bool,
@@ -275,6 +276,7 @@ pub fn run(show_settings: bool) -> Result<()> {
             hwnd: HWND::default(),
             renderer,
             frame_timer: None,
+            location_hook: None,
             enabled: true,
             rendering: false,
             active: None,
@@ -333,24 +335,7 @@ pub fn run(show_settings: bool) -> Result<()> {
             let _ = DestroyWindow(hwnd);
             return Err(error);
         }
-        let _foreground_hook = ForegroundHook(hook);
-        let location_hook = SetWinEventHook(
-            EVENT_OBJECT_LOCATIONCHANGE,
-            EVENT_OBJECT_LOCATIONCHANGE,
-            None,
-            Some(foreground_event),
-            0,
-            0,
-            2,
-        );
-        if location_hook.0.is_null() {
-            let error = Error::from_win32();
-            MAIN_WINDOW.store(0, Ordering::Release);
-            let _ = Shell_NotifyIconW(NIM_DELETE, &tray);
-            let _ = DestroyWindow(hwnd);
-            return Err(error);
-        }
-        let _location_hook = ForegroundHook(location_hook);
+        let _foreground_hook = WinEventHook(hook);
         if let Some(error) = update_foreground(&mut state) {
             show_error(&error);
         }
@@ -573,9 +558,9 @@ fn rearm_after_error(state: &mut AppState) {
     }
 }
 
-struct ForegroundHook(HWINEVENTHOOK);
+struct WinEventHook(HWINEVENTHOOK);
 
-impl Drop for ForegroundHook {
+impl Drop for WinEventHook {
     fn drop(&mut self) {
         unsafe {
             let _ = UnhookWinEvent(self.0);
@@ -614,24 +599,42 @@ unsafe extern "system" fn foreground_event(
     }
 }
 
-fn foreground_executable() -> Option<(PathBuf, bool)> {
+struct Foreground {
+    executable: PathBuf,
+    process_id: u32,
+    on_primary: bool,
+}
+
+fn foreground_window() -> Option<Foreground> {
     unsafe {
         let hwnd = GetForegroundWindow();
         if hwnd.0.is_null() {
             return None;
         }
-        let executable = window_executable(hwnd)?;
+        let process_id = window_process_id(hwnd);
+        let executable = process_executable(process_id)?;
         let monitor = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONULL);
         let primary = MonitorFromPoint(POINT { x: 0, y: 0 }, MONITOR_DEFAULTTOPRIMARY);
-        let on_primary = !monitor.0.is_null() && monitor == primary;
-        Some((executable, on_primary))
+        Some(Foreground {
+            executable,
+            process_id,
+            on_primary: !monitor.0.is_null() && monitor == primary,
+        })
     }
 }
 
+fn window_process_id(hwnd: HWND) -> u32 {
+    let mut process_id = 0;
+    unsafe { GetWindowThreadProcessId(hwnd, Some(&mut process_id)) };
+    process_id
+}
+
 fn window_executable(hwnd: HWND) -> Option<PathBuf> {
+    process_executable(window_process_id(hwnd))
+}
+
+fn process_executable(process_id: u32) -> Option<PathBuf> {
     unsafe {
-        let mut process_id = 0;
-        GetWindowThreadProcessId(hwnd, Some(&mut process_id));
         if process_id == 0 {
             return None;
         }
@@ -742,8 +745,9 @@ fn update_foreground(state: &mut AppState) -> Option<String> {
 }
 
 fn apply_foreground(state: &mut AppState) -> Option<String> {
-    let foreground = foreground_executable();
-    let executable = foreground.as_ref().map(|(path, _)| path);
+    let foreground = foreground_window();
+    sync_location_hook(state, foreground.as_ref());
+    let executable = foreground.as_ref().map(|foreground| &foreground.executable);
     if let Some(executable) = executable
         && !paths_match(executable, &state.application_executable)
     {
@@ -768,7 +772,7 @@ fn apply_foreground(state: &mut AppState) -> Option<String> {
         state.enabled,
         foreground
             .as_ref()
-            .is_some_and(|(_, on_primary)| *on_primary),
+            .is_some_and(|foreground| foreground.on_primary),
         executable
             .filter(|path| !paths_match(path, &state.application_executable))
             .map(PathBuf::as_path),
@@ -815,6 +819,35 @@ fn apply_foreground(state: &mut AppState) -> Option<String> {
     state.rendering = true;
     state.active = Some(selected);
     None
+}
+
+/// Only hooks the foreground app when the effect could apply; a global hook wakes on every mouse move.
+fn sync_location_hook(state: &mut AppState, foreground: Option<&Foreground>) {
+    let process_id = foreground
+        .filter(|foreground| {
+            state.enabled
+                && !paths_match(&foreground.executable, &state.application_executable)
+                && (state.settings.always_on
+                    || state.settings.profile_for(&foreground.executable).is_some())
+        })
+        .map(|foreground| foreground.process_id);
+    if state.location_hook.as_ref().map(|(id, _)| *id) == process_id {
+        return;
+    }
+    state.location_hook = process_id.and_then(|process_id| {
+        let hook = unsafe {
+            SetWinEventHook(
+                EVENT_OBJECT_LOCATIONCHANGE,
+                EVENT_OBJECT_LOCATIONCHANGE,
+                None,
+                Some(foreground_event),
+                process_id,
+                0,
+                0,
+            )
+        };
+        (!hook.0.is_null()).then(|| (process_id, WinEventHook(hook)))
+    });
 }
 
 fn stop_after_error(state: &mut AppState) {
