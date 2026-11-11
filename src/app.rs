@@ -136,7 +136,8 @@ unsafe extern "system" {
 struct AppState {
     hwnd: HWND,
     renderer: Renderer,
-    frame_timer: FrameTimer,
+    /// Only exists while the effect is on or briefly paused, so an idle tray holds no extra thread.
+    frame_timer: Option<FrameTimer>,
     /// False after a render failure, so we don't retry (and re-show the error) on every
     /// foreground change. Re-armed when settings are saved or the display changes.
     enabled: bool,
@@ -272,21 +273,10 @@ pub fn run(show_settings: bool) -> Result<()> {
         }
         let mut renderer = Renderer::new()?;
         renderer.set_capturable(settings.show_in_screenshots)?;
-        let frame_timer = FrameTimer::new(|| {
-            let hwnd = MAIN_WINDOW.load(Ordering::Acquire);
-            if hwnd != 0 {
-                let _ = PostMessageW(
-                    HWND(hwnd as *mut std::ffi::c_void),
-                    RENDER_FRAME,
-                    WPARAM(0),
-                    LPARAM(0),
-                );
-            }
-        })?;
         let mut state = Box::new(AppState {
             hwnd: HWND::default(),
             renderer,
-            frame_timer,
+            frame_timer: None,
             enabled: true,
             rendering: false,
             active: None,
@@ -520,6 +510,7 @@ unsafe extern "system" fn window_proc(
         }
         if !state.rendering {
             state.renderer.release_gpu();
+            state.frame_timer = None;
         }
         return LRESULT(0);
     }
@@ -529,16 +520,18 @@ unsafe extern "system" fn window_proc(
             if !state.rendering {
                 return LRESULT(0);
             }
-            let result = state
-                .renderer
-                .render()
-                .and_then(|()| state.frame_timer.frame_done());
+            let result = state.renderer.render().and_then(|()| {
+                state
+                    .frame_timer
+                    .as_mut()
+                    .map_or(Ok(()), FrameTimer::frame_done)
+            });
             if let Err(error) = result {
                 let _ = state.renderer.set_enabled(false);
                 state.enabled = false;
                 state.rendering = false;
                 state.active = None;
-                state.frame_timer.stop();
+                state.frame_timer = None;
                 sync_tray_status(state);
                 Some(format!("nijimi stopped rendering:\n{error}"))
             } else {
@@ -558,7 +551,7 @@ unsafe extern "system" fn window_proc(
                 let _ = state.renderer.set_enabled(false);
                 state.rendering = false;
                 state.active = None;
-                state.frame_timer.stop();
+                state.frame_timer = None;
                 sync_tray_status(state);
                 Some(format!("nijimi could not refresh the display:\n{error}"))
             } else {
@@ -791,11 +784,14 @@ fn apply_foreground(state: &mut AppState) -> Option<String> {
             let result = state.renderer.pause();
             state.rendering = false;
             state.active = None;
-            state.frame_timer.stop();
+            if let Some(timer) = state.frame_timer.as_mut() {
+                timer.stop();
+            }
             unsafe {
                 if SetTimer(state.hwnd, RELEASE_TIMER, RELEASE_AFTER_MS, None) == 0 {
                     // No timer means no deferred release, so free everything now.
                     state.renderer.release_gpu();
+                    state.frame_timer = None;
                 }
             }
             if let Err(error) = result {
@@ -838,7 +834,27 @@ fn apply_foreground(state: &mut AppState) -> Option<String> {
 
 fn start_frame_timer(state: &mut AppState) -> Result<()> {
     let fps = state.settings.frame_rate.fps();
-    state.frame_timer.start(fps)
+    let timer = match state.frame_timer.as_mut() {
+        Some(timer) => timer,
+        None => state
+            .frame_timer
+            .insert(FrameTimer::new(post_render_frame)?),
+    };
+    timer.start(fps)
+}
+
+fn post_render_frame() {
+    let hwnd = MAIN_WINDOW.load(Ordering::Acquire);
+    if hwnd != 0 {
+        unsafe {
+            let _ = PostMessageW(
+                HWND(hwnd as *mut std::ffi::c_void),
+                RENDER_FRAME,
+                WPARAM(0),
+                LPARAM(0),
+            );
+        }
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
