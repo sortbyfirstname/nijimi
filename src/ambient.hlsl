@@ -236,17 +236,10 @@ float3 blurAt(float2 uv, float radius)
     return lerp(sampleBSpline(uv, lower), sampleBSpline(uv, upper), lod - lower);
 }
 
-// Measured outwards from the edge of the sampled area, the blur radius only ever grows, so
-// sharpness falls off smoothly instead of stopping at a line.
-//
-// Over the covered edge of the picture (edge softness), it grows to half the band's width while
-// the overlay fades in, reaching full opacity a pixel before the picture ends so the picture's
-// own hard edge is always hidden. Where the picture still shows through, the overlay is nearly
-// as sharp as it, so nothing ghosts.
-//
-// Across the bar (edge blend), it carries on from there to the glow's radius, handing over to the
-// glow itself across the whole band. A shorter handover would cut off glow spilling in from
-// bright things further out with a straight line. Without edge blend the bar is just the glow.
+// The blur radius only grows outwards from the sampled area, so sharpness never stops at a line.
+// Over the picture's edge (edge softness) the overlay fades in, fully opaque a pixel before the
+// picture ends to hide its hard edge. Across the bar (edge blend) it hands over to the glow over
+// the whole band; a shorter handover would cut off glow from further out with a straight line.
 float4 blendEdge(float2 uv, float4 glow, bool inside)
 {
     uint width, height;

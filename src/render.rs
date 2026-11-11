@@ -49,26 +49,22 @@ use crate::geometry::{
 use crate::settings::EffectSettings;
 
 const WINDOW_CLASS: windows::core::PCWSTR = w!("NijimiOverlayWindow");
-/// Blur and edge blend at 100%, as fractions of the screen's shorter side.
+/// Effect sizes at 100%, as fractions of the screen's shorter side.
 const MAX_BLUR_SIGMA: f32 = 0.04;
 const MAX_EDGE_BLEND: f32 = 0.1;
-/// How much of the picture's outermost edge edge softness covers at 100%.
 const MAX_EDGE_SOFTNESS: f32 = 0.01;
 /// Edge blend always covers at least this much of the picture's edge. Video and games often have
 /// a fringe there that would otherwise be mirrored into the bar as a thin line.
 const MIN_BLEND_INSET: f32 = 2.0;
-/// Caps the per-pass Gaussian taps (in blur texels), which bounds GPU cost at half resolution.
-/// A glow at full resolution (only the Settings preview, which renders at half size) gets twice
-/// as many so the strongest blur isn't cut short.
+/// Caps Gaussian taps per pass to bound GPU cost. The full-resolution glow (Settings preview
+/// only) gets twice as many.
 const MAX_BLUR_RADIUS: f32 = 128.0;
 const CAPTURE_RETRY_INITIAL: Duration = Duration::from_millis(250);
 const CAPTURE_RETRY_MAX: Duration = Duration::from_secs(4);
 const INITIAL_FRAME_TIMEOUT_MS: u32 = 100;
 static OVERLAY_CLASS_REGISTERED: OnceLock<()> = OnceLock::new();
 
-/// The overlay window plus, only while a configured app is active, the GPU resources that draw
-/// into it. Keeping the GPU side optional means an idle tray app holds no D3D device, swap chain,
-/// or full-resolution textures.
+/// The GPU side only exists while an app is active, so an idle tray holds no device or textures.
 pub struct Renderer {
     hwnd: HWND,
     width: u32,
@@ -100,8 +96,7 @@ struct Gpu {
     captured_texture: ID3D11Texture2D,
     captured_view: ID3D11ShaderResourceView,
     has_captured_frame: bool,
-    /// The overlay already shows the captured frame with the current scene, so there's nothing
-    /// to redraw until either changes.
+    /// Nothing to redraw until the captured frame or the scene changes.
     up_to_date: bool,
     shaders: AmbientShaders,
 }
@@ -143,8 +138,8 @@ impl Default for SceneConstants {
 struct BlurScale {
     /// The prefiltered picture, whose mips the edge blend reads.
     prefilter: u32,
-    /// The glow's Gaussian passes. Never finer than half resolution: at the glow's radius it
-    /// looks the same, and full resolution would cost about eight times as much.
+    /// The glow's Gaussian passes. Never finer than half resolution: it looks the same and
+    /// full resolution costs about 8x.
     glow: u32,
 }
 
@@ -158,8 +153,7 @@ impl BlurScale {
 }
 
 struct SceneGeometry {
-    /// The part of the content that is sampled and never drawn over: the content minus the
-    /// edge the edge blend covers.
+    /// The content minus the edge the edge blend covers: sampled, and never drawn over.
     clear_rect: ScreenRect,
     blur_scale: BlurScale,
     constants: SceneConstants,
@@ -270,7 +264,6 @@ struct BlurTarget {
     view: ID3D11ShaderResourceView,
 }
 
-/// The downsampled textures the blur passes run through. Their size follows the blur resolution.
 struct BlurTargets {
     scale: BlurScale,
     prefilter_width: u32,
@@ -622,53 +615,58 @@ impl Renderer {
         Ok(())
     }
 
-    pub fn set_enabled(&mut self, enabled: bool) -> Result<()> {
-        if enabled {
-            if self.gpu.is_none() {
-                self.gpu = Some(Gpu::new(
-                    self.hwnd,
-                    self.width,
-                    self.height,
-                    self.scene.blur_scale,
-                )?);
-            }
-            let gpu = self.gpu.as_mut().unwrap();
+    /// A failed GPU build is retried by [`Self::render`]; the driver may not be ready yet at sign-in.
+    pub fn set_enabled(&mut self, enabled: bool) {
+        self.enabled = enabled;
+        if !enabled {
+            // Hide first so the last frame never shows; the next activation starts cleared.
+            let _ = unsafe { ShowWindow(self.hwnd, SW_HIDE) };
+            self.gpu = None;
+            return;
+        }
+        self.rebuild_retry.reset();
+        if self.gpu.is_none() {
+            self.build_gpu();
+        }
+        if let Some(gpu) = self.gpu.as_mut() {
             if gpu.duplication.is_none() {
-                // On failure, `render` retries and rebuilds the device if needed.
                 gpu.capture_retry.reset();
                 gpu.duplication = unsafe { gpu.output.DuplicateOutput(&gpu.device) }.ok();
             }
-            self.rebuild_retry.reset();
-            self.enabled = true;
             let _ = unsafe { ShowWindow(self.hwnd, SW_SHOWNOACTIVATE) };
-        } else {
-            self.enabled = false;
-            // Hide first so the last frame is never visible, then release every GPU resource.
-            // The next activation builds a fresh swap chain that starts cleared.
-            let _ = unsafe { ShowWindow(self.hwnd, SW_HIDE) };
-            self.gpu = None;
         }
-        Ok(())
     }
 
-    /// Hides the overlay and stops capturing, but keeps the GPU resources so a quick return to
-    /// the game (e.g. Alt-Tab and back) skips the ~75 ms driver device creation. Call
-    /// [`Self::release_gpu`] once the pause has lasted long enough to be worth freeing them.
-    pub fn pause(&mut self) -> Result<()> {
+    fn build_gpu(&mut self) {
+        match Gpu::new(self.hwnd, self.width, self.height, self.scene.blur_scale) {
+            Ok(gpu) => {
+                self.gpu = Some(gpu);
+                let _ = unsafe { ShowWindow(self.hwnd, SW_SHOWNOACTIVATE) };
+            }
+            Err(_) => self.rebuild_retry.schedule(),
+        }
+    }
+
+    fn drop_gpu(&mut self) {
+        let _ = unsafe { ShowWindow(self.hwnd, SW_HIDE) };
+        self.gpu = None;
+        self.rebuild_retry.schedule();
+    }
+
+    /// Keeps the GPU so Alt-Tabbing back skips ~75 ms of device creation; see [`Self::release_gpu`].
+    pub fn pause(&mut self) {
         self.enabled = false;
         let _ = unsafe { ShowWindow(self.hwnd, SW_HIDE) };
         let Some(gpu) = self.gpu.as_mut() else {
-            return Ok(());
+            return;
         };
         gpu.duplication = None;
         gpu.has_captured_frame = false;
         gpu.up_to_date = false;
         // Clear so the previous game's frame never flashes when the overlay is shown again.
-        if let Err(error) = gpu.clear_overlay() {
+        if gpu.clear_overlay().is_err() {
             self.gpu = None;
-            return Err(error);
         }
-        Ok(())
     }
 
     pub fn is_capturing(&self) -> bool {
@@ -677,7 +675,6 @@ impl Renderer {
             .is_some_and(|gpu| gpu.duplication.is_some())
     }
 
-    /// Frees all GPU resources if the overlay is not currently active.
     pub fn release_gpu(&mut self) {
         if !self.enabled {
             self.gpu = None;
@@ -685,9 +682,9 @@ impl Renderer {
     }
 
     pub fn refresh(&mut self, enabled: bool) -> Result<()> {
-        let _ = self.set_enabled(false);
+        self.set_enabled(false);
         let mut replacement = Self::with_options(self.aspect_ratio, self.effect, self.capturable)?;
-        replacement.set_enabled(enabled)?;
+        replacement.set_enabled(enabled);
         *self = replacement;
         Ok(())
     }
@@ -714,17 +711,20 @@ impl Renderer {
             if !self.rebuild_retry.is_ready() {
                 return Ok(());
             }
-            match Gpu::new(self.hwnd, self.width, self.height, self.scene.blur_scale) {
-                Ok(gpu) => self.gpu = Some(gpu),
-                Err(_) => {
-                    self.rebuild_retry.schedule();
-                    return Ok(());
-                }
+            self.build_gpu();
+            if self.gpu.is_none() {
+                return Ok(());
             }
         }
-        if self.gpu.as_mut().unwrap().render(&self.scene)? == Capture::Stale {
-            self.gpu = None;
-            self.rebuild_retry.schedule();
+        let gpu = self.gpu.as_mut().unwrap();
+        let capture = match gpu.render(&self.scene) {
+            Ok(capture) => capture,
+            // Device removed (driver update, GPU reset or switch): rebuild.
+            Err(_) if unsafe { gpu.device.GetDeviceRemovedReason() }.is_err() => Capture::Stale,
+            Err(error) => return Err(error),
+        };
+        if capture == Capture::Stale {
+            self.drop_gpu();
         } else if self.gpu.as_ref().unwrap().duplication.is_some() {
             self.rebuild_retry.reset();
         }
@@ -733,9 +733,9 @@ impl Renderer {
 }
 
 impl Renderer {
-    /// An always-on-top game that re-activates, e.g. after the Win+Shift+S overlay closes, lands
-    /// above the overlay, often without a foreground event reaching us. Raise the overlay back
-    /// over the foreground window only, so other always-on-top tools aren't fought over.
+    /// A topmost game that re-activates (e.g. after Win+Shift+S) lands above the overlay, often
+    /// without a foreground event. Only raise above the foreground window, so other topmost
+    /// tools aren't fought over.
     fn stay_above_foreground(&self) {
         unsafe {
             let foreground = GetForegroundWindow();
@@ -903,13 +903,7 @@ impl Gpu {
                 self.draw_if_stale(scene)?;
                 return Ok(Capture::Healthy);
             }
-            self.duplication = None;
-            self.has_captured_frame = false;
-            self.capture_retry.schedule();
-            return Ok(match self.clear_overlay() {
-                Ok(()) => Capture::Healthy,
-                Err(_) => Capture::Stale,
-            });
+            return Ok(self.lose_duplication());
         }
 
         // A zero present time means only the mouse pointer moved.
@@ -925,9 +919,21 @@ impl Gpu {
         };
         let release_result = unsafe { duplication.ReleaseFrame() };
         frame_result?;
-        release_result?;
+        if release_result.is_err() {
+            return Ok(self.lose_duplication());
+        }
         self.draw_if_stale(scene)?;
         Ok(Capture::Healthy)
+    }
+
+    fn lose_duplication(&mut self) -> Capture {
+        self.duplication = None;
+        self.has_captured_frame = false;
+        self.capture_retry.schedule();
+        match self.clear_overlay() {
+            Ok(()) => Capture::Healthy,
+            Err(_) => Capture::Stale,
+        }
     }
 
     fn draw_if_stale(&mut self, scene: &SceneGeometry) -> Result<()> {
@@ -1089,9 +1095,8 @@ unsafe fn draw_ambient(pass: AmbientPass<'_>) -> Result<()> {
     Ok(())
 }
 
-/// Where the glow passes need to run: the bars, widened by everything the passes after the
-/// first read around each texel (the Gaussian's radius, plus the wide passes and filtering).
-/// Only the bars are ever shown, and they're often a small part of the screen.
+/// The bars, widened by how far the later glow passes read around each texel. Only the bars are
+/// ever shown.
 fn glow_scissors(
     regions: &[ScreenRect; 4],
     scene: &SceneGeometry,

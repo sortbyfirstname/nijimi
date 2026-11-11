@@ -62,8 +62,7 @@ const EVENT_SYSTEM_FOREGROUND: u32 = 3;
 const EVENT_OBJECT_LOCATIONCHANGE: u32 = 0x800b;
 const EXIT_COMMAND: u32 = 2;
 const SETTINGS_COMMAND: u32 = 3;
-/// Fires once after the overlay has been paused this long, to free its GPU resources. Keeping
-/// them briefly makes Alt-Tabbing back into a game near-instant.
+/// Frees the GPU after a pause this long; keeping it briefly makes Alt-Tabbing back instant.
 const RELEASE_TIMER: usize = 2;
 const RELEASE_AFTER_MS: u32 = 60_000;
 static MAIN_WINDOW: AtomicIsize = AtomicIsize::new(0);
@@ -138,8 +137,8 @@ struct AppState {
     renderer: Renderer,
     /// Only exists while the effect is on or briefly paused, so an idle tray holds no extra thread.
     frame_timer: Option<FrameTimer>,
-    /// False after a render failure, so we don't retry (and re-show the error) on every
-    /// foreground change. Re-armed when settings are saved or the display changes.
+    /// False after a failure, so it isn't retried and re-reported on every foreground change.
+    /// Re-armed when settings are saved or the display changes.
     enabled: bool,
     rendering: bool,
     active: Option<ActiveProfile>,
@@ -233,8 +232,7 @@ fn ensure_dpi_awareness() -> Result<()> {
     }
 }
 
-/// Runs the tray app. `show_settings` opens the Settings window too, as when the user launches
-/// nijimi themselves; if nijimi is already running, that instance is asked to open it instead.
+/// `show_settings` opens Settings too, via the running instance if there is one.
 pub fn run(show_settings: bool) -> Result<()> {
     unsafe {
         ensure_dpi_awareness()?;
@@ -527,11 +525,7 @@ unsafe extern "system" fn window_proc(
                     .map_or(Ok(()), FrameTimer::frame_done)
             });
             if let Err(error) = result {
-                let _ = state.renderer.set_enabled(false);
-                state.enabled = false;
-                state.rendering = false;
-                state.active = None;
-                state.frame_timer = None;
+                stop_after_error(state);
                 sync_tray_status(state);
                 Some(format!("nijimi stopped rendering:\n{error}"))
             } else {
@@ -548,7 +542,7 @@ unsafe extern "system" fn window_proc(
         let error = unsafe {
             let state = &mut *state_ptr;
             if let Err(error) = state.renderer.refresh(state.rendering) {
-                let _ = state.renderer.set_enabled(false);
+                state.renderer.set_enabled(false);
                 state.rendering = false;
                 state.active = None;
                 state.frame_timer = None;
@@ -781,7 +775,7 @@ fn apply_foreground(state: &mut AppState) -> Option<String> {
     );
     if !state.enabled || selected.is_none() {
         if state.rendering {
-            let result = state.renderer.pause();
+            state.renderer.pause();
             state.rendering = false;
             state.active = None;
             if let Some(timer) = state.frame_timer.as_mut() {
@@ -789,13 +783,9 @@ fn apply_foreground(state: &mut AppState) -> Option<String> {
             }
             unsafe {
                 if SetTimer(state.hwnd, RELEASE_TIMER, RELEASE_AFTER_MS, None) == 0 {
-                    // No timer means no deferred release, so free everything now.
                     state.renderer.release_gpu();
                     state.frame_timer = None;
                 }
-            }
-            if let Err(error) = result {
-                return Some(format!("nijimi could not pause rendering:\n{error}"));
             }
         }
         return None;
@@ -809,19 +799,14 @@ fn apply_foreground(state: &mut AppState) -> Option<String> {
         .renderer
         .configure(selected.aspect_ratio, selected.effect)
     {
+        stop_after_error(state);
         return Some(format!(
             "nijimi could not apply the selected aspect ratio:\n{error}"
         ));
     }
-    if let Err(error) = state.renderer.set_enabled(true) {
-        state.rendering = false;
-        state.active = None;
-        return Some(format!("nijimi could not start rendering:\n{error}"));
-    }
+    state.renderer.set_enabled(true);
     if let Err(error) = start_frame_timer(state) {
-        let _ = state.renderer.set_enabled(false);
-        state.rendering = false;
-        state.active = None;
+        stop_after_error(state);
         return Some(format!("nijimi could not start its render timer:\n{error}"));
     }
     unsafe {
@@ -830,6 +815,14 @@ fn apply_foreground(state: &mut AppState) -> Option<String> {
     state.rendering = true;
     state.active = Some(selected);
     None
+}
+
+fn stop_after_error(state: &mut AppState) {
+    state.renderer.set_enabled(false);
+    state.enabled = false;
+    state.rendering = false;
+    state.active = None;
+    state.frame_timer = None;
 }
 
 fn start_frame_timer(state: &mut AppState) -> Result<()> {
@@ -963,8 +956,7 @@ fn set_tip(tray: &mut NOTIFYICONDATAW, status: TrayStatus) {
     }
 }
 
-/// The Settings window, matched by its title *and* by belonging to this executable, so a File
-/// Explorer window open on a folder called "nijimi" is never mistaken for it.
+/// Matched by title and executable, so an Explorer window on a "nijimi" folder never matches.
 pub(crate) fn find_settings_window() -> Option<HWND> {
     let executable = std::env::current_exe().ok()?;
     let mut after = HWND::default();
@@ -986,8 +978,7 @@ pub(crate) fn find_settings_window() -> Option<HWND> {
     }
 }
 
-/// Lets the running instance bring Settings to the front, using the foreground rights Windows
-/// gave this launch.
+/// Passes this launch's foreground rights on so the running instance can raise Settings.
 fn ask_running_tray_to_open_settings() {
     unsafe {
         let _ = AllowSetForegroundWindow(ASFW_ANY);

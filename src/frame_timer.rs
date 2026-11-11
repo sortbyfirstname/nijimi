@@ -10,10 +10,8 @@ use windows::Win32::System::Threading::{
 };
 use windows::core::{Error, PCWSTR, Result};
 
-/// Calls `on_tick` once per frame. `SetTimer` only ticks every ~15.6 ms, which can't hold 60 fps,
-/// so this waits on a high-resolution waitable timer on its own thread. Each tick is one-shot and
-/// the next is armed by [`Self::frame_done`], so ticks never pile up behind a slow frame, and a
-/// stopped timer never wakes.
+/// `SetTimer` only ticks every ~15.6 ms, too coarse for 60 fps. Ticks are one-shot and re-armed
+/// by [`Self::frame_done`], so they never pile up behind a slow frame.
 pub struct FrameTimer {
     timer: HANDLE,
     stop: Arc<AtomicBool>,
@@ -72,8 +70,6 @@ impl FrameTimer {
         self.arm(next)
     }
 
-    /// Schedules the next tick a frame after the last one, keeping a steady rate, or a frame
-    /// from now if rendering has fallen behind.
     pub fn frame_done(&mut self) -> Result<()> {
         let Some(previous) = self.next else {
             return Ok(());

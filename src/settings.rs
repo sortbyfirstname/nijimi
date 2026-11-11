@@ -408,7 +408,6 @@ pub fn add_app_choices(
     unique
 }
 
-/// Profile executables sorted by file name, ignoring case, then by full path.
 pub fn sorted_profile_paths(profiles: &[AppProfile]) -> Vec<PathBuf> {
     let key = |path: &Path| {
         (
@@ -454,8 +453,6 @@ pub fn config_path() -> Result<PathBuf> {
     Ok(path)
 }
 
-/// Picks the settings file, in order: an existing portable file, an existing per-user file,
-/// a new portable file if the executable's folder is writable, otherwise a new per-user file.
 fn resolve_config_path(
     executable_dir: &Path,
     appdata_dir: Option<&Path>,

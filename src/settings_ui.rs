@@ -37,8 +37,7 @@ const ASPECT_PRESETS: [&str; 5] = ["16:9", "21:9", "32:9", "16:10", "4:3"];
 
 fn render_logo() -> Result<Arc<RenderImage>, String> {
     SvgRenderer::new(Arc::new(()))
-        // Mark only (800x800); the wordmark is drawn as real text so it gets proper hinting/AA.
-        // Rasterized at 2x the 20px display size so it stays crisp on high-DPI displays.
+        // Mark only, at 2x its 20px display size; the wordmark is real text.
         .render_single_frame(include_bytes!("../assets/tresbient-logo.svg"), 0.05)
         .map_err(|error| format!("Could not render the settings logo: {error}"))
 }
@@ -397,8 +396,7 @@ impl SettingsView {
         Some((aspect_ratio, effect))
     }
 
-    /// Starts a render when the preview is out of date. Only one runs at a time; when it finishes,
-    /// the view re-renders and this catches up with anything that changed meanwhile.
+    /// One render at a time; when it finishes, the next view render catches up with any changes.
     fn refresh_preview(&mut self, cx: &mut Context<Self>) {
         if self.preview.busy {
             return;
@@ -470,7 +468,6 @@ impl SettingsView {
         }
     }
 
-    /// Whether the effect controls on this page are editable.
     fn effect_editable(&self) -> bool {
         match self.page {
             SettingsPage::Global => true,
@@ -1506,7 +1503,6 @@ impl Render for SettingsView {
     }
 }
 
-/// A title and description on the left, with room for a control on the right.
 fn setting_row(title: &'static str, description: &'static str) -> gpui_kit::Div {
     div().flex().items_center().justify_between().gap_5().child(
         div()

@@ -20,7 +20,6 @@ use windows::core::{PCWSTR, Result};
 const ICON_SIZE: i32 = 32;
 const APPLICATION_ICON_RESOURCE_ID: usize = 1;
 
-/// Loads the application icon embedded in the executable at the requested size.
 pub fn load_application_icon(size: i32) -> Result<HICON> {
     unsafe {
         let module = GetModuleHandleW(None)?;
@@ -36,7 +35,6 @@ pub fn load_application_icon(size: i32) -> Result<HICON> {
     }
 }
 
-/// Sets the small and large icons shown for a native application window.
 pub fn set_window_icons(hwnd: windows::Win32::Foundation::HWND) -> Result<()> {
     let small = load_application_icon(16)?;
     let large = load_application_icon(32)?;
@@ -171,7 +169,6 @@ fn straight_alpha(black: &[u8], white: &[u8]) -> Vec<u8> {
     result
 }
 
-/// Extracts an executable's Shell icon as a GPUI image. The caller owns caching.
 pub fn executable_icon(path: &Path) -> Option<Arc<RenderImage>> {
     let mut wide: Vec<u16> = path.as_os_str().encode_wide().collect();
     if wide.is_empty() || wide.contains(&0) || !path.is_file() {
