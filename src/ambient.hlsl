@@ -172,7 +172,9 @@ float4 PSBlur(VertexOutput input) : SV_TARGET
     float distancePixels = length(distanceFromContent * float2(width, height));
     float fadeRadius = max(1.0, min(width, height) * 0.45);
     float fade = exp(-0.5 * (distancePixels / fadeRadius) * (distancePixels / fadeRadius));
-    float alpha = 0.86 * fade;
+    // As bright as the picture where it meets it, settling to the glow's own level far enough
+    // out that the drop never reads as a line.
+    float alpha = lerp(1.0, 0.86, smoothstep(0.0, 0.5 * fadeRadius, distancePixels)) * fade;
     float3 broadColor = ambient.SampleLevel(linearClamp, input.uv, 0).rgb;
     float3 detailColor = narrowAmbient.SampleLevel(linearClamp, input.uv, 0).rgb;
     float3 color = lerp(broadColor, detailColor, 0.35);
@@ -185,13 +187,41 @@ float dither(float2 position)
     return frac(52.9829189 * frac(dot(position, float2(0.06711056, 0.00583715)))) - 0.5;
 }
 
-// A blur whose radius, in screen pixels, can change from pixel to pixel. It reads the
-// prefiltered texture's mip chain with four bilinear taps to hide the mips' blockiness, and fades
-// in from the sharp picture below the radius of a single prefiltered texel.
+// Reads one mip level with a cubic B-spline instead of bilinear filtering. Bilinear turns the
+// coarse, box-filtered mips into a visible grid of ramps; the B-spline is smooth across texel
+// boundaries. Its 4x4 footprint is gathered with four bilinear taps.
+float3 sampleBSpline(float2 uv, uint level)
+{
+    uint width, height, levels;
+    prefiltered.GetDimensions(level, width, height, levels);
+    float2 size = float2(width, height);
+    float2 position = uv * size - 0.5;
+    float2 base = floor(position);
+    float2 f = position - base;
+    float2 f2 = f * f;
+    float2 f3 = f2 * f;
+    float2 w0 = (1.0 - 3.0 * f + 3.0 * f2 - f3) / 6.0;
+    float2 w1 = (4.0 - 6.0 * f2 + 3.0 * f3) / 6.0;
+    float2 w2 = (1.0 + 3.0 * f + 3.0 * f2 - 3.0 * f3) / 6.0;
+    float2 w3 = f3 / 6.0;
+    float2 g0 = w0 + w1;
+    float2 g1 = w2 + w3;
+    float2 uv0 = (base - 0.5 + w1 / g0) / size;
+    float2 uv1 = (base + 1.5 + w3 / g1) / size;
+    return g0.y * (g0.x * prefiltered.SampleLevel(linearClamp, float2(uv0.x, uv0.y), level).rgb
+                 + g1.x * prefiltered.SampleLevel(linearClamp, float2(uv1.x, uv0.y), level).rgb)
+         + g1.y * (g0.x * prefiltered.SampleLevel(linearClamp, float2(uv0.x, uv1.y), level).rgb
+                 + g1.x * prefiltered.SampleLevel(linearClamp, float2(uv1.x, uv1.y), level).rgb);
+}
+
+// A blur whose radius, in screen pixels, can change from pixel to pixel. It blends between the
+// two nearest levels of the prefiltered texture's mip chain, and fades in from the sharp picture
+// below the radius of a single prefiltered texel.
 float3 blurAt(float2 uv, float radius)
 {
-    // A box `downsample` pixels wide blurs about as much as a Gaussian of 0.29 times that width.
-    float texelRadius = 0.29 * downsample;
+    // A mip texel read through the B-spline blurs about as much as a Gaussian of 0.65 times its
+    // width (0.29 from the box average, the rest from the B-spline).
+    float texelRadius = 0.65 * downsample;
     if (radius < texelRadius)
     {
         float3 sharp = sampleReflected(uv).rgb;
@@ -200,12 +230,9 @@ float3 blurAt(float2 uv, float radius)
     uint width, height, levels;
     prefiltered.GetDimensions(0, width, height, levels);
     float lod = min(log2(radius / texelRadius), levels - 1.0);
-    float2 offset = 0.5 * exp2(lod) / float2(width, height);
-    float3 color = prefiltered.SampleLevel(linearClamp, uv + float2(-offset.x, -offset.y), lod).rgb;
-    color += prefiltered.SampleLevel(linearClamp, uv + float2(offset.x, -offset.y), lod).rgb;
-    color += prefiltered.SampleLevel(linearClamp, uv + float2(-offset.x, offset.y), lod).rgb;
-    color += prefiltered.SampleLevel(linearClamp, uv + float2(offset.x, offset.y), lod).rgb;
-    return color * 0.25;
+    uint lower = (uint)lod;
+    uint upper = min(lower + 1, levels - 1);
+    return lerp(sampleBSpline(uv, lower), sampleBSpline(uv, upper), lod - lower);
 }
 
 // Measured outwards from the edge of the sampled area, the blur radius only ever grows, so
@@ -217,7 +244,8 @@ float3 blurAt(float2 uv, float radius)
 // as sharp as it, so nothing ghosts.
 //
 // Across the bar (edge blend), it carries on from there to the glow's radius, handing over to the
-// glow itself across the outer 60%. Without edge blend the bar is just the glow.
+// glow itself across the whole band. A shorter handover would cut off glow spilling in from
+// bright things further out with a straight line. Without edge blend the bar is just the glow.
 float4 blendEdge(float2 uv, float4 glow, bool inside)
 {
     uint width, height;
@@ -237,7 +265,7 @@ float4 blendEdge(float2 uv, float4 glow, bool inside)
         return glow;
     float radius = lerp(edgeRadius, blurSigma * downsample, progress);
     float4 color = float4(blurAt(uv, radius), 1.0);
-    return lerp(color, glow, smoothstep(0.4, 1.0, progress));
+    return lerp(color, glow, smoothstep(0.0, 1.0, progress));
 }
 
 float4 PSComposite(VertexOutput input) : SV_TARGET

@@ -23,7 +23,8 @@ It's also built to cost your games next to nothing. The whole effect runs on the
 ## Features
 
 - **Per-game profiles.** Give each game its own aspect ratio (`16:9`, `21:9`, `32:9`, `16:10`, `4:3`, or any custom `width:height`).
-- **Tunable look.** Set edge softness (soften the picture's outermost few pixels), edge blend (blur the picture gradually into the bars instead of a hard line), blur strength, and blur resolution globally, and override them for any game. A live preview in Settings shows the result on a sample image, sized to your monitor.
+- **Tunable look.** Set edge softness (soften the picture's outermost few pixels), edge blend (blur the picture gradually into the bars instead of a hard line), blur strength, and blur resolution (full down to an eighth) globally, and override them for any game. A live preview in Settings shows the result on a sample image, sized to your monitor.
+- **Frame rate.** Update the effect at 30 fps (default), 60 fps, or your display's refresh rate.
 - **Automatic.** Turns on when a configured game is the foreground app on your primary display, and pauses on Alt-Tab.
 - **Lightweight.** Capture, blur, and compositing all stay on the GPU, and frames are never copied back to the CPU. Nothing renders while you're not playing, and there's no polling: it reacts to Windows events.
 - **Never covers the game.** The centred game area is left untouched; the effect is drawn only outside it.
@@ -37,7 +38,7 @@ nijimi exists to make games look better, so it can't be allowed to make them run
 - **Zero work when idle.** No game in focus means no capture, no rendering, and no timers. The app sleeps until Windows reports a foreground change.
 - **Nothing held when idle.** The graphics device, overlay surfaces, and capture are created only when a configured game comes to the front, and fully released a minute after it leaves (so a quick Alt-Tab and back is instant). Idle, nijimi holds no GPU memory at all.
 - **GPU-only pipeline.** Desktop frames are captured, blurred, and composited entirely in GPU memory. No pixels ever cross to the CPU.
-- **Cheap by construction.** The blur is computed at reduced resolution (a quarter by default) with separable passes, refreshed about 30 times a second rather than at your monitor's refresh rate, and only drawn outside the game area.
+- **Cheap by construction.** The blur is computed at reduced resolution (a quarter by default) with separable passes, refreshed 30 times a second by default rather than at your monitor's refresh rate, redrawn only when the picture has actually changed, and only drawn outside the game area.
 - **Doesn't touch the game.** No injection, no hooks inside the game's process, no driver. nijimi is a separate click-through window and nothing is ever loaded into the game.
 - **UI only when you open it.** The Settings window runs as its own short-lived process and exits when closed, so the always-running part carries no UI framework.
 
@@ -121,8 +122,8 @@ Only one tray instance runs per Windows session. If Windows Explorer restarts, t
 
 ### Rendering pipeline
 
-1. **Capture.** The desktop is captured with DXGI Desktop Duplication. Frames stay in GPU memory and are never copied to the CPU. The latest frame is kept in a texture and redrawn even when DXGI reports no new frame.
-2. **Sample.** The content near the edges of the protected rectangle is reflected outward and averaged down to the blur resolution (half, quarter, or eighth).
+1. **Capture.** The desktop is captured with DXGI Desktop Duplication. Frames stay in GPU memory and are never copied to the CPU. The latest frame is kept in a texture, and the overlay is only redrawn when the picture or the settings change, so a static screen or a moving mouse costs no GPU work.
+2. **Sample.** The content near the edges of the protected rectangle is reflected outward and averaged down to the blur resolution (full, half, quarter, or eighth).
 3. **Blur.** A separable Gaussian sized by the blur strength, plus a wider smoothing pass, produces a broad, soft glow, followed by a distance fade away from the content. Intermediates are 10-bit and the result half-float, so wide gradients don't band.
 4. **Composite.** The full-resolution result is dithered and clipped to the area *outside* the protected rectangle, then presented through a click-through DirectComposition overlay. With edge softness or edge blend on, the overlay also covers the content's outermost few pixels (at most 1% of the screen's shorter side; video and games often have a fringe there), fully opaque at the very edge and fading into the picture. From the start of that band outwards the blur radius grows smoothly from zero to the glow's, read from a mip chain of the prefiltered texture, so sharpness falls off without a seam. The overlay excludes itself from capture by default, and because it never samples anything it draws over, it never feeds back into its own input even when screenshots are allowed to show it.
 
@@ -134,7 +135,7 @@ The project's main goal is minimal impact on the game you're playing.
 
 - **Idle.** When the configured game leaves the foreground, rendering and capture stop immediately and the overlay is hidden. The Direct3D device, swap chain, composition objects, and textures are kept for one minute so a quick return is instant, then all released. Only the hidden overlay window remains.
 - **Precompiled shaders.** `build.rs` compiles `src/ambient.hlsl` to bytecode at build time, so the HLSL compiler is never loaded and no shaders are compiled at runtime.
-- **Active.** The render loop runs at about 30 fps, entirely on the GPU, and blurs at reduced resolution.
+- **Active.** The render loop runs at 30 fps by default (60 fps or the display's refresh rate if chosen), paced by a high-resolution waitable timer, entirely on the GPU, and blurs at reduced resolution unless Full is chosen. Ticks with no new desktop frame skip drawing, so even Match display costs little more than the game's own frame rate requires.
 - **Recovery.** If capture access is lost (for example on a UAC prompt or a mode switch), the overlay is cleared and capture is retried with a backoff of up to four seconds. Resources are rebuilt after display changes. If rendering fails, it stops rather than retrying on every window switch, and tries again when settings are saved or the display configuration changes.
 - **Process lookup.** If Windows refuses access to a process's path, it's treated as not matching any profile, so the effect stays off.
 

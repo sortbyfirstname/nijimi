@@ -49,6 +49,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 use windows::core::{Error, PCWSTR, PWSTR, Result, w};
 
+use crate::frame_timer::{FrameTimer, display_refresh_rate};
 use crate::geometry::AspectRatio;
 use crate::render::Renderer;
 use crate::settings::{self, ActiveProfile, AppProfile, AppSettings, paths_match};
@@ -56,11 +57,11 @@ use crate::settings::{self, ActiveProfile, AppProfile, AppSettings, paths_match}
 const TRAY_CALLBACK: u32 = WM_APP + 1;
 const FOREGROUND_CHANGED: u32 = WM_APP + 2;
 const SETTINGS_RELOADED: u32 = WM_APP + 3;
+const RENDER_FRAME: u32 = WM_APP + 4;
 const EVENT_SYSTEM_FOREGROUND: u32 = 3;
 const EVENT_OBJECT_LOCATIONCHANGE: u32 = 0x800b;
 const EXIT_COMMAND: u32 = 2;
 const SETTINGS_COMMAND: u32 = 3;
-const RENDER_TIMER: usize = 1;
 /// Fires once after the overlay has been paused this long, to free its GPU resources. Keeping
 /// them briefly makes Alt-Tabbing back into a game near-instant.
 const RELEASE_TIMER: usize = 2;
@@ -135,6 +136,7 @@ unsafe extern "system" {
 struct AppState {
     hwnd: HWND,
     renderer: Renderer,
+    frame_timer: FrameTimer,
     /// False after a render failure, so we don't retry (and re-show the error) on every
     /// foreground change. Re-armed when settings are saved or the display changes.
     enabled: bool,
@@ -270,9 +272,21 @@ pub fn run(show_settings: bool) -> Result<()> {
         }
         let mut renderer = Renderer::new()?;
         renderer.set_capturable(settings.show_in_screenshots)?;
+        let frame_timer = FrameTimer::new(|| {
+            let hwnd = MAIN_WINDOW.load(Ordering::Acquire);
+            if hwnd != 0 {
+                let _ = PostMessageW(
+                    HWND(hwnd as *mut std::ffi::c_void),
+                    RENDER_FRAME,
+                    WPARAM(0),
+                    LPARAM(0),
+                );
+            }
+        })?;
         let mut state = Box::new(AppState {
             hwnd: HWND::default(),
             renderer,
+            frame_timer,
             enabled: true,
             rendering: false,
             active: None,
@@ -483,10 +497,16 @@ unsafe extern "system" fn window_proc(
                         "nijimi could not change whether screenshots show the effect:\n{error}"
                     ));
                 }
+                let frame_rate_changed = settings.frame_rate != state.settings.frame_rate;
                 state.settings = settings;
                 rearm_after_error(state);
                 if let Some(error) = update_foreground(state) {
                     show_error(&error);
+                } else if frame_rate_changed
+                    && state.rendering
+                    && let Err(error) = start_frame_timer(state)
+                {
+                    show_error(&format!("nijimi could not change the frame rate:\n{error}"));
                 }
             }
             Err(error) => show_error(&format!("nijimi could not reload settings:\n{error}")),
@@ -503,18 +523,22 @@ unsafe extern "system" fn window_proc(
         }
         return LRESULT(0);
     }
-    if message == WM_TIMER {
+    if message == RENDER_FRAME {
         let error = unsafe {
             let state = &mut *state_ptr;
             if !state.rendering {
                 return LRESULT(0);
             }
-            if let Err(error) = state.renderer.render() {
+            let result = state
+                .renderer
+                .render()
+                .and_then(|()| state.frame_timer.frame_done());
+            if let Err(error) = result {
                 let _ = state.renderer.set_enabled(false);
                 state.enabled = false;
                 state.rendering = false;
                 state.active = None;
-                let _ = KillTimer(state.hwnd, RENDER_TIMER);
+                state.frame_timer.stop();
                 sync_tray_status(state);
                 Some(format!("nijimi stopped rendering:\n{error}"))
             } else {
@@ -534,9 +558,14 @@ unsafe extern "system" fn window_proc(
                 let _ = state.renderer.set_enabled(false);
                 state.rendering = false;
                 state.active = None;
-                let _ = KillTimer(state.hwnd, RENDER_TIMER);
+                state.frame_timer.stop();
                 sync_tray_status(state);
                 Some(format!("nijimi could not refresh the display:\n{error}"))
+            } else if state.rendering {
+                // The refresh rate may have changed.
+                start_frame_timer(state)
+                    .err()
+                    .map(|error| format!("nijimi could not restart rendering:\n{error}"))
             } else {
                 None
             }
@@ -767,8 +796,8 @@ fn apply_foreground(state: &mut AppState) -> Option<String> {
             let result = state.renderer.pause();
             state.rendering = false;
             state.active = None;
+            state.frame_timer.stop();
             unsafe {
-                let _ = KillTimer(state.hwnd, RENDER_TIMER);
                 if SetTimer(state.hwnd, RELEASE_TIMER, RELEASE_AFTER_MS, None) == 0 {
                     // No timer means no deferred release, so free everything now.
                     state.renderer.release_gpu();
@@ -798,8 +827,7 @@ fn apply_foreground(state: &mut AppState) -> Option<String> {
         state.active = None;
         return Some(format!("nijimi could not start rendering:\n{error}"));
     }
-    if unsafe { SetTimer(state.hwnd, RENDER_TIMER, 33, None) } == 0 {
-        let error = Error::from_win32();
+    if let Err(error) = start_frame_timer(state) {
         let _ = state.renderer.set_enabled(false);
         state.rendering = false;
         state.active = None;
@@ -811,6 +839,11 @@ fn apply_foreground(state: &mut AppState) -> Option<String> {
     state.rendering = true;
     state.active = Some(selected);
     None
+}
+
+fn start_frame_timer(state: &mut AppState) -> Result<()> {
+    let fps = state.settings.frame_rate.fps(display_refresh_rate());
+    state.frame_timer.start(fps)
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]

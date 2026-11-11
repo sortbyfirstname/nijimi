@@ -9,16 +9,18 @@ const APP_DIR_NAME: &str = "nijimi";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BlurResolution {
+    Full,
     Half,
     Quarter,
     Eighth,
 }
 
 impl BlurResolution {
-    pub const ALL: [Self; 3] = [Self::Half, Self::Quarter, Self::Eighth];
+    pub const ALL: [Self; 4] = [Self::Eighth, Self::Quarter, Self::Half, Self::Full];
 
     pub fn scale(self) -> u32 {
         match self {
+            Self::Full => 1,
             Self::Half => 2,
             Self::Quarter => 4,
             Self::Eighth => 8,
@@ -27,6 +29,7 @@ impl BlurResolution {
 
     pub fn label(self) -> &'static str {
         match self {
+            Self::Full => "Full",
             Self::Half => "Half",
             Self::Quarter => "Quarter",
             Self::Eighth => "Eighth",
@@ -35,6 +38,7 @@ impl BlurResolution {
 
     fn key(self) -> &'static str {
         match self {
+            Self::Full => "full",
             Self::Half => "half",
             Self::Quarter => "quarter",
             Self::Eighth => "eighth",
@@ -45,6 +49,47 @@ impl BlurResolution {
         Self::ALL
             .into_iter()
             .find(|resolution| resolution.key() == key)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum FrameRate {
+    #[default]
+    Thirty,
+    Sixty,
+    /// The primary display's refresh rate.
+    Match,
+}
+
+impl FrameRate {
+    pub const ALL: [Self; 3] = [Self::Thirty, Self::Sixty, Self::Match];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Thirty => "30",
+            Self::Sixty => "60",
+            Self::Match => "Match display",
+        }
+    }
+
+    pub fn fps(self, refresh_rate: u32) -> u32 {
+        match self {
+            Self::Thirty => 30,
+            Self::Sixty => 60,
+            Self::Match => refresh_rate.max(1),
+        }
+    }
+
+    fn key(self) -> &'static str {
+        match self {
+            Self::Thirty => "30",
+            Self::Sixty => "60",
+            Self::Match => "match",
+        }
+    }
+
+    fn from_key(key: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|rate| rate.key() == key)
     }
 }
 
@@ -120,6 +165,7 @@ pub struct AppSettings {
     pub default_effect: EffectSettings,
     pub always_on: bool,
     pub show_in_screenshots: bool,
+    pub frame_rate: FrameRate,
     pub profiles: Vec<AppProfile>,
 }
 
@@ -130,6 +176,7 @@ impl Default for AppSettings {
             default_effect: EffectSettings::default(),
             always_on: false,
             show_in_screenshots: false,
+            frame_rate: FrameRate::default(),
             profiles: Vec::new(),
         }
     }
@@ -178,6 +225,11 @@ impl AppSettings {
             if ratio == "@effect" {
                 settings.default_effect =
                     EffectSettings::parse(executable).ok_or_else(|| invalid_line(line_number))?;
+                continue;
+            }
+            if ratio == "@frame_rate" {
+                settings.frame_rate = FrameRate::from_key(executable.trim())
+                    .ok_or_else(|| invalid_line(line_number))?;
                 continue;
             }
             let flag = match ratio {
@@ -230,6 +282,9 @@ impl AppSettings {
         }
         if self.show_in_screenshots {
             contents.push_str("@show_in_screenshots|1\n");
+        }
+        if self.frame_rate != FrameRate::default() {
+            contents.push_str(&format!("@frame_rate|{}\n", self.frame_rate.key()));
         }
         for profile in &self.profiles {
             let executable = profile.executable.to_str().ok_or_else(|| {
@@ -864,6 +919,52 @@ mod tests {
     }
 
     #[test]
+    fn full_resolution_round_trips() {
+        let loaded = AppSettings::parse("@effect|resolution=full\n").unwrap();
+        assert_eq!(loaded.default_effect.resolution, BlurResolution::Full);
+        assert_eq!(BlurResolution::Full.scale(), 1);
+        assert_eq!(
+            loaded.default_effect.serialize(),
+            "softness=50,blend=60,blur=80,resolution=full"
+        );
+    }
+
+    #[test]
+    fn frame_rate_round_trips_and_defaults_to_30() {
+        assert_eq!(AppSettings::default().frame_rate, FrameRate::Thirty);
+        for (line, rate) in [
+            ("@frame_rate|30\n", FrameRate::Thirty),
+            ("@frame_rate|60\n", FrameRate::Sixty),
+            ("@frame_rate|match\n", FrameRate::Match),
+        ] {
+            assert_eq!(AppSettings::parse(line).unwrap().frame_rate, rate);
+        }
+        assert!(AppSettings::parse("@frame_rate|144\n").is_err());
+        assert_eq!(FrameRate::Sixty.fps(165), 60);
+        assert_eq!(FrameRate::Match.fps(165), 165);
+
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "nijimi-settings-frame-rate-{}-{unique}.ini",
+            std::process::id()
+        ));
+        let settings = AppSettings {
+            frame_rate: FrameRate::Match,
+            ..AppSettings::default()
+        };
+        settings.save(&path).unwrap();
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            "@global|21:9\n@frame_rate|match\n"
+        );
+        assert_eq!(AppSettings::load(&path).unwrap(), settings);
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
     fn partial_effect_lines_keep_defaults_and_invalid_values_are_rejected() {
         let loaded = AppSettings::parse("@effect|softness=30\n").unwrap();
         assert_eq!(
@@ -875,7 +976,7 @@ mod tests {
         );
         assert!(AppSettings::parse("@effect|blend=101\n").is_err());
         assert!(AppSettings::parse("@effect|softness=101\n").is_err());
-        assert!(AppSettings::parse("@effect|resolution=full\n").is_err());
+        assert!(AppSettings::parse("@effect|resolution=double\n").is_err());
         assert!(AppSettings::parse("@effect|glow=3\n").is_err());
         assert!(AppSettings::parse("16:9,blur=x|C:\\Game.exe\n").is_err());
     }

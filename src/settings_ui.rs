@@ -25,7 +25,9 @@ use windows::core::w;
 
 use crate::geometry::AspectRatio;
 use crate::render::{Preview, PreviewImage, primary_screen_size};
-use crate::settings::{self, AppProfile, AppSettings, BlurResolution, EffectSettings, paths_match};
+use crate::settings::{
+    self, AppProfile, AppSettings, BlurResolution, EffectSettings, FrameRate, paths_match,
+};
 use crate::{app, app_icon, startup};
 
 pub const WINDOW_TITLE: &str = "nijimi";
@@ -1106,6 +1108,30 @@ impl SettingsView {
             .child(self.render_effect_card(cx))
             .child(
                 toggle_card(
+                    "Frame rate",
+                    "How often the effect updates. Higher is smoother but uses more GPU. Match display follows your refresh rate.",
+                )
+                .child(
+                    div()
+                        .flex()
+                        .gap_1()
+                        .flex_shrink_0()
+                        .children(FrameRate::ALL.map(|rate| {
+                            let button = Button::new(format!("frame-rate-{}", rate.label()))
+                                .label(rate.label())
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.update_settings(|settings| settings.frame_rate = rate, cx);
+                                }));
+                            if rate == self.settings.frame_rate {
+                                button.primary()
+                            } else {
+                                button.ghost()
+                            }
+                        })),
+                ),
+            )
+            .child(
+                toggle_card(
                     "Always on",
                     "Show the effect over every app, not just profiled games. Apps without a profile use the default ratio.",
                 )
@@ -1515,6 +1541,8 @@ fn toggle_card(title: &'static str, description: &'static str) -> gpui_kit::Div 
             div()
                 .flex()
                 .flex_col()
+                .flex_1()
+                .min_w_0()
                 .gap_1()
                 .child(div().text_sm().text_color(rgb(0xe5e5e5)).child(title))
                 .child(div().text_xs().text_color(rgb(0xa6a6a6)).child(description)),

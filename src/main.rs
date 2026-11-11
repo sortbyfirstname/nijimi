@@ -13,6 +13,9 @@ mod app;
 mod app_icon;
 
 #[cfg(windows)]
+mod frame_timer;
+
+#[cfg(windows)]
 mod render;
 
 #[cfg(windows)]
