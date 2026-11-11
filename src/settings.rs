@@ -1,0 +1,463 @@
+use std::fs;
+use std::io::{Error, ErrorKind, Result};
+use std::path::{Path, PathBuf};
+
+use crate::geometry::AspectRatio;
+
+const CONFIG_FILE_NAME: &str = "um-bee-ants.ini";
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AppProfile {
+    pub executable: PathBuf,
+    pub aspect_ratio: AspectRatio,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AppSettings {
+    pub default_aspect_ratio: AspectRatio,
+    pub profiles: Vec<AppProfile>,
+}
+
+impl Default for AppSettings {
+    fn default() -> Self {
+        Self {
+            default_aspect_ratio: AspectRatio::new(21, 9).unwrap(),
+            profiles: Vec::new(),
+        }
+    }
+}
+
+impl AspectRatio {
+    pub fn parse(value: &str) -> Option<Self> {
+        let (width, height) = value.trim().split_once(':')?;
+        Self::new(width.trim().parse().ok()?, height.trim().parse().ok()?)
+    }
+}
+
+impl AppSettings {
+    pub fn load(path: &Path) -> Result<Self> {
+        let contents = match fs::read_to_string(path) {
+            Ok(contents) => contents,
+            Err(error) if error.kind() == ErrorKind::NotFound => return Ok(Self::default()),
+            Err(error) => return Err(error),
+        };
+
+        Self::parse(&contents)
+    }
+
+    fn parse(contents: &str) -> Result<Self> {
+        let mut settings = Self::default();
+        for (line_number, line) in contents.lines().enumerate() {
+            if line.trim().is_empty() {
+                continue;
+            }
+            let Some((ratio, executable)) = line.split_once('|') else {
+                return Err(invalid_line(line_number));
+            };
+            if ratio == "@global" {
+                settings.default_aspect_ratio =
+                    AspectRatio::parse(executable).ok_or_else(|| invalid_line(line_number))?;
+                continue;
+            }
+            let aspect_ratio =
+                AspectRatio::parse(ratio).ok_or_else(|| invalid_line(line_number))?;
+            let executable = executable.trim();
+            if executable.is_empty() {
+                return Err(invalid_line(line_number));
+            }
+            settings.upsert(AppProfile {
+                executable: PathBuf::from(executable),
+                aspect_ratio,
+            });
+        }
+        Ok(settings)
+    }
+
+    pub fn save(&self, path: &Path) -> Result<()> {
+        let mut contents = String::new();
+        contents.push_str(&format!(
+            "@global|{}:{}\n",
+            self.default_aspect_ratio.width, self.default_aspect_ratio.height
+        ));
+        for profile in &self.profiles {
+            let executable = profile.executable.to_str().ok_or_else(|| {
+                Error::new(
+                    ErrorKind::InvalidData,
+                    "executable path is not valid Unicode",
+                )
+            })?;
+            if executable.contains(['\n', '\r', '|']) {
+                return Err(Error::new(
+                    ErrorKind::InvalidInput,
+                    "executable path contains a reserved settings character",
+                ));
+            }
+            contents.push_str(&format!(
+                "{}:{}|{}\n",
+                profile.aspect_ratio.width, profile.aspect_ratio.height, executable
+            ));
+        }
+
+        let temporary = path.with_extension("tmp");
+        fs::write(&temporary, contents)?;
+        if let Err(error) = fs::rename(&temporary, path) {
+            let _ = fs::remove_file(temporary);
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    pub fn upsert(&mut self, profile: AppProfile) {
+        if let Some(existing) = self
+            .profiles
+            .iter_mut()
+            .find(|existing| paths_match(&existing.executable, &profile.executable))
+        {
+            *existing = profile;
+        } else {
+            self.profiles.push(profile);
+        }
+    }
+
+    pub fn remove(&mut self, executable: &Path) -> bool {
+        let old_len = self.profiles.len();
+        self.profiles
+            .retain(|profile| !paths_match(&profile.executable, executable));
+        self.profiles.len() != old_len
+    }
+
+    pub fn ratio_for(&self, executable: &Path) -> Option<AspectRatio> {
+        self.profiles
+            .iter()
+            .find(|profile| paths_match(&profile.executable, executable))
+            .map(|profile| profile.aspect_ratio)
+    }
+
+    pub fn active_profile(
+        &self,
+        enabled: bool,
+        on_primary_display: bool,
+        foreground: Option<&Path>,
+    ) -> Option<(PathBuf, AspectRatio)> {
+        if !enabled || !on_primary_display {
+            return None;
+        }
+        let executable = foreground?;
+        self.ratio_for(executable)
+            .map(|ratio| (executable.to_path_buf(), ratio))
+    }
+}
+
+pub fn paths_match(left: &Path, right: &Path) -> bool {
+    left.as_os_str()
+        .to_string_lossy()
+        .eq_ignore_ascii_case(&right.as_os_str().to_string_lossy())
+}
+
+pub fn add_app_choices(
+    recent: &[PathBuf],
+    running: &[PathBuf],
+    profiles: &[AppProfile],
+    application_executable: &Path,
+    preferred: Option<&Path>,
+) -> Vec<PathBuf> {
+    let mut choices = Vec::new();
+    if let Some(path) = preferred {
+        choices.push(path.to_path_buf());
+    }
+    choices.extend(recent.iter().cloned());
+    choices.extend(running.iter().cloned());
+
+    let mut unique: Vec<PathBuf> = Vec::new();
+    for path in choices {
+        if paths_match(&path, application_executable)
+            || profiles
+                .iter()
+                .any(|profile| paths_match(&profile.executable, &path))
+            || unique.iter().any(|existing| paths_match(existing, &path))
+        {
+            continue;
+        }
+        unique.push(path);
+    }
+    unique
+}
+
+pub fn filter_app_choices(paths: &[PathBuf], query: &str) -> Vec<PathBuf> {
+    let query = query.trim().to_lowercase();
+    if query.is_empty() {
+        return paths.to_vec();
+    }
+    paths
+        .iter()
+        .filter(|path| path.to_string_lossy().to_lowercase().contains(&query))
+        .cloned()
+        .collect()
+}
+
+pub fn config_path() -> Result<PathBuf> {
+    let executable = std::env::current_exe()?;
+    executable
+        .parent()
+        .map(|parent| parent.join(CONFIG_FILE_NAME))
+        .ok_or_else(|| Error::new(ErrorKind::NotFound, "application directory is unavailable"))
+}
+
+fn invalid_line(line_number: usize) -> Error {
+    Error::new(
+        ErrorKind::InvalidData,
+        format!("invalid um-bee-ants settings line {}", line_number + 1),
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    use super::*;
+
+    #[test]
+    fn parses_and_bounds_aspect_ratios() {
+        assert_eq!(AspectRatio::parse(" 21 : 9 "), AspectRatio::new(21, 9));
+        assert_eq!(AspectRatio::parse("16:9:4"), None);
+        assert_eq!(AspectRatio::parse("0:9"), None);
+        assert_eq!(AspectRatio::parse("5:1"), None);
+    }
+
+    #[test]
+    fn new_settings_default_to_21_9() {
+        assert_eq!(
+            AppSettings::default().default_aspect_ratio,
+            AspectRatio::new(21, 9).unwrap()
+        );
+    }
+
+    #[test]
+    fn matches_executable_paths_without_case_sensitivity() {
+        assert!(paths_match(
+            Path::new(r"C:\Games\Example.exe"),
+            Path::new(r"c:\games\EXAMPLE.EXE")
+        ));
+    }
+
+    #[test]
+    fn config_path_uses_the_application_name() {
+        assert_eq!(
+            config_path().unwrap().file_name().unwrap(),
+            CONFIG_FILE_NAME
+        );
+    }
+
+    #[test]
+    fn manually_copied_settings_load_and_the_source_file_is_preserved() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!(
+            "um-bee-ants-migration-{}-{unique}",
+            std::process::id()
+        ));
+        fs::create_dir(&directory).unwrap();
+        let path = directory.join(CONFIG_FILE_NAME);
+        let source_path = directory.join("previous.ini");
+        fs::write(&source_path, "16:9|G:\\Games\\Example.exe\n").unwrap();
+
+        let missing_config = AppSettings::load(&path).unwrap();
+        assert!(missing_config.profiles.is_empty());
+        fs::copy(&source_path, &path).unwrap();
+        let loaded = AppSettings::load(&path).unwrap();
+
+        assert_eq!(
+            loaded.ratio_for(Path::new(r"G:\Games\Example.exe")),
+            AspectRatio::new(16, 9)
+        );
+        assert!(source_path.exists());
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn malformed_or_unreadable_settings_are_reported() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!(
+            "um-bee-ants-invalid-{}-{unique}",
+            std::process::id()
+        ));
+        fs::create_dir(&directory).unwrap();
+        let path = directory.join(CONFIG_FILE_NAME);
+        fs::write(&path, "not-a-profile\n").unwrap();
+        assert_eq!(
+            AppSettings::load(&path).unwrap_err().kind(),
+            ErrorKind::InvalidData
+        );
+        fs::remove_file(&path).unwrap();
+
+        fs::create_dir(&path).unwrap();
+        assert!(AppSettings::load(&path).is_err());
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn settings_round_trip_and_replace_existing_profiles() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "um-bee-ants-settings-{}-{unique}.ini",
+            std::process::id()
+        ));
+        let mut settings = AppSettings::default();
+        assert_eq!(
+            settings.default_aspect_ratio,
+            AspectRatio::new(21, 9).unwrap()
+        );
+        settings.upsert(AppProfile {
+            executable: PathBuf::from(r"C:\Games\Example.exe"),
+            aspect_ratio: AspectRatio::new(16, 9).unwrap(),
+        });
+        settings.default_aspect_ratio = AspectRatio::new(21, 9).unwrap();
+        settings.upsert(AppProfile {
+            executable: PathBuf::from(r"c:\games\example.EXE"),
+            aspect_ratio: AspectRatio::new(16, 9).unwrap(),
+        });
+
+        settings.save(&path).unwrap();
+        let mut loaded = AppSettings::load(&path).unwrap();
+        assert_eq!(loaded.profiles.len(), 1);
+        assert_eq!(
+            loaded.default_aspect_ratio,
+            AspectRatio::new(21, 9).unwrap()
+        );
+        assert_eq!(
+            loaded.ratio_for(Path::new(r"C:\GAMES\EXAMPLE.exe")),
+            AspectRatio::new(16, 9)
+        );
+        loaded.upsert(AppProfile {
+            executable: PathBuf::from(r"C:\Games\Example.exe"),
+            aspect_ratio: AspectRatio::new(32, 9).unwrap(),
+        });
+        loaded.save(&path).unwrap();
+        loaded = AppSettings::load(&path).unwrap();
+        assert_eq!(
+            loaded.ratio_for(Path::new(r"C:\Games\Example.exe")),
+            AspectRatio::new(32, 9)
+        );
+        assert!(loaded.remove(Path::new(r"c:\games\example.exe")));
+        assert_eq!(loaded.profiles.len(), 0);
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn malformed_settings_are_reported_instead_of_silently_discarded() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "um-bee-ants-settings-invalid-{}-{unique}.ini",
+            std::process::id()
+        ));
+        fs::write(&path, "not-a-profile\n").unwrap();
+        assert_eq!(
+            AppSettings::load(&path).unwrap_err().kind(),
+            ErrorKind::InvalidData
+        );
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn settings_without_global_ratio_keep_the_default_and_load_profiles() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "um-bee-ants-settings-default-{}-{unique}.ini",
+            std::process::id()
+        ));
+        fs::write(&path, "16:9|G:\\Games\\Example.exe\n").unwrap();
+        let loaded = AppSettings::load(&path).unwrap();
+        assert_eq!(
+            loaded.default_aspect_ratio,
+            AspectRatio::new(21, 9).unwrap()
+        );
+        assert_eq!(
+            loaded.ratio_for(Path::new(r"G:\Games\Example.exe")),
+            AspectRatio::new(16, 9)
+        );
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn add_choices_keep_recent_order_and_exclude_configured_apps() {
+        let recent = vec![
+            PathBuf::from(r"G:\Games\Recent.exe"),
+            PathBuf::from(r"C:\Games\Shared.exe"),
+        ];
+        let running = vec![
+            PathBuf::from(r"g:\games\recent.EXE"),
+            PathBuf::from(r"D:\Tools\Running.exe"),
+        ];
+        let profiles = vec![AppProfile {
+            executable: PathBuf::from(r"C:\Games\Shared.exe"),
+            aspect_ratio: AspectRatio::new(16, 9).unwrap(),
+        }];
+        let choices = add_app_choices(
+            &recent,
+            &running,
+            &profiles,
+            Path::new(r"P:\Apps\um-bee-ants.exe"),
+            Some(Path::new(r"E:\Browse\Chosen.exe")),
+        );
+        assert_eq!(
+            choices,
+            vec![
+                PathBuf::from(r"E:\Browse\Chosen.exe"),
+                PathBuf::from(r"G:\Games\Recent.exe"),
+                PathBuf::from(r"D:\Tools\Running.exe"),
+            ]
+        );
+    }
+
+    #[test]
+    fn app_search_matches_case_insensitive_names_and_paths_without_changing_values() {
+        let paths = vec![
+            PathBuf::from(r"G:\Games\ExampleGame.exe"),
+            PathBuf::from(r"C:\Tools\editor.exe"),
+        ];
+        assert_eq!(
+            filter_app_choices(&paths, "examplegame"),
+            vec![PathBuf::from(r"G:\Games\ExampleGame.exe")]
+        );
+        assert_eq!(
+            filter_app_choices(&paths, r"c:\tools"),
+            vec![PathBuf::from(r"C:\Tools\editor.exe")]
+        );
+        assert_eq!(filter_app_choices(&paths, "  "), paths);
+    }
+
+    #[test]
+    fn foreground_profile_activation_fails_closed_when_disabled_or_unmatched() {
+        let mut settings = AppSettings::default();
+        settings.upsert(AppProfile {
+            executable: PathBuf::from(r"C:\Games\Example.exe"),
+            aspect_ratio: AspectRatio::new(21, 9).unwrap(),
+        });
+        let matching = Path::new(r"c:\games\EXAMPLE.EXE");
+        assert_eq!(
+            settings.active_profile(true, true, Some(matching)),
+            Some((matching.to_path_buf(), AspectRatio::new(21, 9).unwrap()))
+        );
+        assert_eq!(settings.active_profile(false, true, Some(matching)), None);
+        assert_eq!(settings.active_profile(true, false, Some(matching)), None);
+        assert_eq!(
+            settings.active_profile(true, true, Some(Path::new(r"C:\Games\Other.exe"))),
+            None
+        );
+        assert_eq!(settings.active_profile(true, true, None), None);
+    }
+}

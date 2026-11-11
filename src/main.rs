@@ -1,0 +1,41 @@
+#![cfg_attr(windows, windows_subsystem = "windows")]
+
+mod geometry;
+mod settings;
+
+#[cfg(windows)]
+#[allow(dead_code)]
+// Retained Win32 settings helpers are no longer used by the GPUI Settings process.
+mod app;
+
+#[cfg(windows)]
+#[allow(dead_code)]
+mod app_icon;
+
+#[cfg(windows)]
+mod render;
+
+#[cfg(windows)]
+mod settings_ui;
+
+#[cfg(windows)]
+fn main() {
+    let mut args = std::env::args_os().skip(1);
+    if args.next().is_some_and(|argument| argument == "--settings") {
+        let recent_apps = if args.next().is_some_and(|argument| argument == "--recent") {
+            args.map(std::path::PathBuf::from).collect()
+        } else {
+            Vec::new()
+        };
+        if let Err(error) = settings_ui::run(recent_apps) {
+            app::show_error(&format!("um•bee•ants could not start Settings:\n{error}"));
+        }
+    } else if let Err(error) = app::run() {
+        app::show_error(&format!("um•bee•ants could not start:\n{error}"));
+    }
+}
+
+#[cfg(not(windows))]
+fn main() {
+    eprintln!("um•bee•ants is a Windows-only application.");
+}
