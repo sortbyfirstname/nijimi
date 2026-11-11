@@ -150,6 +150,10 @@ In RustRover, the shared **Run** configuration launches the app with `dev-releas
 
 The app icon is embedded as a Windows resource from `assets/tresbient.ico`, and the UI's SVG assets are compiled into the binary. Windows may keep showing a cached icon until Explorer refreshes its icon cache.
 
+### Releasing
+
+The **Build** GitHub Actions workflow tests every push and pull request. To publish a release, bump `version` in `Cargo.toml` and push to `main`. If that version has no release yet, the workflow builds it, creates the `v<version>` tag, and publishes a GitHub release with `um-bee-ants-v<version>-windows-x64.zip` (exe, README, and license) and its SHA-256 checksum. Pushes that don't change the version only run the tests.
+
 ### Tests
 
 `cargo test` covers aspect-ratio geometry (including portrait and odd-sized displays), settings round trips and activation rules, capture retry behaviour, and offscreen Direct3D WARP rendering of the blur passes.
