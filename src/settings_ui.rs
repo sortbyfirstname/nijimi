@@ -66,6 +66,7 @@ pub fn run(recent_apps: Vec<PathBuf>) -> std::result::Result<(), String> {
         return Ok(());
     }
     let _settings_mutex = SettingsMutex(mutex);
+    app::exit_with_tray();
     let settings_path = settings::config_path().map_err(|error| error.to_string())?;
     let (app_settings, warning) =
         AppSettings::load(&settings_path).map_err(|error| error.to_string())?;

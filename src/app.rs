@@ -18,8 +18,9 @@ use windows::Win32::System::Diagnostics::ToolHelp::{
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Threading::{
-    CreateMutexW, GetProcessTimes, OpenProcess, PROCESS_NAME_FORMAT,
-    PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW,
+    CreateMutexW, GetProcessTimes, INFINITE, OpenProcess, PROCESS_NAME_FORMAT,
+    PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE, QueryFullProcessImageNameW,
+    WaitForSingleObject,
 };
 use windows::Win32::UI::Accessibility::{HWINEVENTHOOK, SetWinEventHook, UnhookWinEvent};
 use windows::Win32::UI::HiDpi::{
@@ -934,6 +935,36 @@ pub(crate) fn find_settings_window() -> Option<HWND> {
     }
 }
 
+const TRAY_PROCESS_VARIABLE: &str = "NIJIMI_TRAY_PROCESS";
+
+/// Exits Settings when the tray that opened it exits, however it exits. Closing the window from
+/// the tray can miss it, e.g. if Settings is still starting when Exit is chosen.
+pub(crate) fn exit_with_tray() {
+    let Some(process_id) = std::env::var(TRAY_PROCESS_VARIABLE)
+        .ok()
+        .and_then(|id| id.parse::<u32>().ok())
+    else {
+        return;
+    };
+    // Holding the handle stops the ID being reused before the executable is checked.
+    let Ok(tray) = (unsafe { OpenProcess(PROCESS_SYNCHRONIZE, false, process_id) }) else {
+        std::process::exit(0);
+    };
+    let is_tray = process_executable(process_id)
+        .zip(std::env::current_exe().ok())
+        .is_some_and(|(tray, executable)| paths_match(&tray, &executable));
+    if !is_tray {
+        std::process::exit(0);
+    }
+    let raw_tray = tray.0 as isize;
+    let _ = std::thread::Builder::new()
+        .name("nijimi tray watch".into())
+        .spawn(move || {
+            unsafe { WaitForSingleObject(HANDLE(raw_tray as *mut std::ffi::c_void), INFINITE) };
+            std::process::exit(0);
+        });
+}
+
 /// Passes this launch's foreground rights on so the running instance can raise Settings.
 fn ask_running_tray_to_open_settings() {
     unsafe {
@@ -964,6 +995,7 @@ unsafe fn open_settings(state_ptr: *mut AppState) -> Option<String> {
         let mut process = Command::new(&state.application_executable);
         process.arg("--settings").arg("--recent");
         process.args(&state.recent_apps);
+        process.env(TRAY_PROCESS_VARIABLE, std::process::id().to_string());
         match process.spawn() {
             Ok(child) => {
                 // The new Settings process needs foreground rights to raise its window.
