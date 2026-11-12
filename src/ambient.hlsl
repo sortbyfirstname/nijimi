@@ -16,8 +16,6 @@ cbuffer SceneInfo : register(b0)
     float downsample;
     float edgeInset;
     float glowDownsample;
-    // Where the render target sits on the screen, so the dither matches across targets.
-    float2 targetOrigin;
 };
 
 struct VertexOutput
@@ -272,7 +270,7 @@ float4 PSComposite(VertexOutput input) : SV_TARGET
         color = blendEdge(input.uv, color, inside);
     else if (inside)
         return 0.0;
-    color.rgb += dither(input.position.xy + targetOrigin) / 255.0 * color.a;
+    color.rgb += dither(input.position.xy) / 255.0 * color.a;
     color.rgb = clamp(color.rgb, 0.0, color.a);
     return color;
 }

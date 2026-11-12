@@ -2,7 +2,7 @@ use std::mem::size_of;
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
-use windows::Win32::Foundation::{BOOL, COLORREF, E_ACCESSDENIED, HWND, POINT, RECT};
+use windows::Win32::Foundation::{BOOL, COLORREF, E_ACCESSDENIED, HWND, RECT};
 use windows::Win32::Graphics::Direct3D::{
     D3D_DRIVER_TYPE, D3D_DRIVER_TYPE_UNKNOWN, D3D_FEATURE_LEVEL_10_0, D3D_FEATURE_LEVEL_10_1,
     D3D_FEATURE_LEVEL_11_0, D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST, D3D_SRV_DIMENSION_TEXTURE2D,
@@ -14,13 +14,12 @@ use windows::Win32::Graphics::Direct3D11::{
     D3D11_SDK_VERSION, D3D11_SHADER_RESOURCE_VIEW_DESC, D3D11_SHADER_RESOURCE_VIEW_DESC_0,
     D3D11_SUBRESOURCE_DATA, D3D11_TEX2D_SRV, D3D11_TEXTURE_ADDRESS_CLAMP, D3D11_TEXTURE2D_DESC,
     D3D11_USAGE_DEFAULT, D3D11_VIEWPORT, D3D11CreateDevice, ID3D11Buffer, ID3D11ClassLinkage,
-    ID3D11DepthStencilView, ID3D11Device, ID3D11DeviceContext, ID3D11DeviceContext1,
-    ID3D11PixelShader, ID3D11RasterizerState, ID3D11RenderTargetView, ID3D11SamplerState,
-    ID3D11ShaderResourceView, ID3D11Texture2D, ID3D11VertexShader,
+    ID3D11DepthStencilView, ID3D11Device, ID3D11DeviceContext, ID3D11PixelShader,
+    ID3D11RasterizerState, ID3D11RenderTargetView, ID3D11SamplerState, ID3D11ShaderResourceView,
+    ID3D11Texture2D, ID3D11VertexShader,
 };
 use windows::Win32::Graphics::DirectComposition::{
-    DCompositionCreateDevice, IDCompositionDevice, IDCompositionSurface, IDCompositionTarget,
-    IDCompositionVisual,
+    DCompositionCreateDevice, IDCompositionDevice, IDCompositionTarget,
 };
 use windows::Win32::Graphics::Dxgi::Common::{
     DXGI_ALPHA_MODE_PREMULTIPLIED, DXGI_FORMAT, DXGI_FORMAT_B8G8R8A8_UNORM,
@@ -28,8 +27,10 @@ use windows::Win32::Graphics::Dxgi::Common::{
 };
 use windows::Win32::Graphics::Dxgi::{
     CreateDXGIFactory1, DXGI_ERROR_NOT_CURRENTLY_AVAILABLE, DXGI_ERROR_SESSION_DISCONNECTED,
-    DXGI_ERROR_WAIT_TIMEOUT, DXGI_OUTDUPL_FRAME_INFO, DXGI_OUTDUPL_MOVE_RECT, IDXGIAdapter,
-    IDXGIAdapter1, IDXGIDevice, IDXGIFactory2, IDXGIOutput1, IDXGIOutputDuplication,
+    DXGI_ERROR_WAIT_TIMEOUT, DXGI_OUTDUPL_FRAME_INFO, DXGI_OUTDUPL_MOVE_RECT, DXGI_PRESENT,
+    DXGI_SCALING_STRETCH, DXGI_SWAP_CHAIN_DESC1, DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL,
+    DXGI_USAGE_RENDER_TARGET_OUTPUT, IDXGIAdapter, IDXGIAdapter1, IDXGIDevice, IDXGIFactory2,
+    IDXGIOutput1, IDXGIOutputDuplication, IDXGISwapChain1,
 };
 use windows::Win32::Graphics::Gdi::{MONITOR_DEFAULTTOPRIMARY, MonitorFromPoint};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
@@ -82,17 +83,14 @@ struct Gpu {
     width: u32,
     height: u32,
     capture_retry: CaptureRetry,
-
     device: ID3D11Device,
     context: ID3D11DeviceContext,
     output: IDXGIOutput1,
     duplication: Option<IDXGIOutputDuplication>,
+    swap_chain: IDXGISwapChain1,
     _target: IDCompositionTarget,
-    composition: IDCompositionDevice,
-    root: IDCompositionVisual,
-    /// One surface per bar, so nothing over the picture is allocated or composited. Surfaces, not
-    /// swap chains: a second Present in a row blocks until the display takes the first.
-    panels: Vec<Panel>,
+    _composition: IDCompositionDevice,
+    render_target: ID3D11RenderTargetView,
     scene_buffer: ID3D11Buffer,
     blur: BlurTargets,
     captured_texture: ID3D11Texture2D,
@@ -101,12 +99,6 @@ struct Gpu {
     /// Nothing to redraw until the captured frame or the scene changes.
     up_to_date: bool,
     shaders: AmbientShaders,
-}
-
-struct Panel {
-    rect: ScreenRect,
-    surface: IDCompositionSurface,
-    _visual: IDCompositionVisual,
 }
 
 struct OverlayWindow(HWND);
@@ -122,7 +114,7 @@ struct SceneConstants {
     downsample: f32,
     edge_inset: f32,
     glow_downsample: f32,
-    target_origin: [f32; 2],
+    _padding: [f32; 2],
 }
 
 impl Default for SceneConstants {
@@ -136,7 +128,7 @@ impl Default for SceneConstants {
             downsample: 4.0,
             edge_inset: 0.0,
             glow_downsample: 4.0,
-            target_origin: [0.0; 2],
+            _padding: [0.0; 2],
         }
     }
 }
@@ -222,7 +214,7 @@ impl SceneGeometry {
                 downsample: blur_scale.prefilter as f32,
                 edge_inset: edge_inset as f32,
                 glow_downsample: blur_scale.glow as f32,
-                target_origin: [0.0; 2],
+                _padding: [0.0; 2],
             },
         })
     }
@@ -385,32 +377,9 @@ fn create_blur_target(device: &ID3D11Device, desc: &D3D11_TEXTURE2D_DESC) -> Res
     }
 }
 
-struct CompositeTarget<'a> {
-    view: &'a ID3D11RenderTargetView,
-    /// Where the target sits on the screen.
-    rect: ScreenRect,
-    /// Where `rect` starts in the view's texture, which DirectComposition may share between surfaces.
-    offset: [i32; 2],
-}
-
-impl<'a> CompositeTarget<'a> {
-    fn whole_screen(view: &'a ID3D11RenderTargetView, width: u32, height: u32) -> Self {
-        Self {
-            view,
-            rect: ScreenRect {
-                left: 0,
-                top: 0,
-                right: width as i32,
-                bottom: height as i32,
-            },
-            offset: [0, 0],
-        }
-    }
-}
-
 struct AmbientPass<'a> {
     context: &'a ID3D11DeviceContext,
-    targets: &'a [CompositeTarget<'a>],
+    render_target: &'a ID3D11RenderTargetView,
     scene_buffer: &'a ID3D11Buffer,
     scene: &'a SceneGeometry,
     blur: &'a BlurTargets,
@@ -899,28 +868,52 @@ impl Gpu {
             let captured_view = captured_view.ok_or_else(Error::from_win32)?;
 
             let dxgi_device: IDXGIDevice = device.cast()?;
+            let swap_desc = DXGI_SWAP_CHAIN_DESC1 {
+                Width: width,
+                Height: height,
+                Format: DXGI_FORMAT_B8G8R8A8_UNORM,
+                Stereo: BOOL(0),
+                SampleDesc: DXGI_SAMPLE_DESC {
+                    Count: 1,
+                    Quality: 0,
+                },
+                BufferUsage: DXGI_USAGE_RENDER_TARGET_OUTPUT,
+                BufferCount: 2,
+                Scaling: DXGI_SCALING_STRETCH,
+                SwapEffect: DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL,
+                AlphaMode: DXGI_ALPHA_MODE_PREMULTIPLIED,
+                Flags: 0,
+            };
+            let swap_chain = factory.CreateSwapChainForComposition(&device, &swap_desc, None)?;
             let composition: IDCompositionDevice = DCompositionCreateDevice(&dxgi_device)?;
             let target = composition.CreateTargetForHwnd(hwnd, BOOL(1))?;
-            let root = composition.CreateVisual()?;
-            target.SetRoot(&root)?;
+            let visual = composition.CreateVisual()?;
+            visual.SetContent(&swap_chain)?;
+            target.SetRoot(&visual)?;
             composition.Commit()?;
+
+            let back_buffer: ID3D11Texture2D = swap_chain.GetBuffer(0)?;
+            let mut render_target = None;
+            device.CreateRenderTargetView(&back_buffer, None, Some(&mut render_target))?;
+            let render_target = render_target.ok_or_else(Error::from_win32)?;
             let scene_buffer = create_scene_buffer(&device)?;
             let blur = BlurTargets::new(&device, width, height, blur_scale)?;
+            context.ClearRenderTargetView(&render_target, &[0.0, 0.0, 0.0, 0.0]);
+            swap_chain.Present(0, DXGI_PRESENT(0)).ok()?;
             let shaders = AmbientShaders::new(&device)?;
 
             Ok(Self {
                 width,
                 height,
-
                 device,
                 context,
                 output,
                 duplication: None,
                 capture_retry: CaptureRetry::default(),
+                swap_chain,
                 _target: target,
-                composition,
-                root,
-                panels: Vec::new(),
+                _composition: composition,
+                render_target,
                 scene_buffer,
                 blur,
                 captured_texture,
@@ -936,7 +929,6 @@ impl Gpu {
         if self.blur.scale != scene.blur_scale {
             self.blur = BlurTargets::new(&self.device, self.width, self.height, scene.blur_scale)?;
         }
-        self.sync_panels(scene)?;
         if self.duplication.is_none() {
             if !self.capture_retry.is_ready() {
                 return Ok(Capture::Healthy);
@@ -1013,157 +1005,37 @@ impl Gpu {
     }
 
     unsafe fn draw(&self, scene: &SceneGeometry, source: &ID3D11ShaderResourceView) -> Result<()> {
-        if self.panels.is_empty() {
-            return Ok(());
-        }
-        let pass = AmbientPass {
-            context: &self.context,
-            targets: &[],
-            scene_buffer: &self.scene_buffer,
-            scene,
-            blur: &self.blur,
-            source,
-            shaders: &self.shaders,
-            width: self.width,
-            height: self.height,
-        };
         unsafe {
-            draw_glow(&pass);
-            for panel in &self.panels {
-                panel.update(&self.device, |target| draw_composite(&pass, target))?;
-            }
-            self.composition.Commit()?;
+            draw_ambient(AmbientPass {
+                context: &self.context,
+                render_target: &self.render_target,
+                scene_buffer: &self.scene_buffer,
+                scene,
+                blur: &self.blur,
+                source,
+                shaders: &self.shaders,
+                width: self.width,
+                height: self.height,
+            })?;
+            self.swap_chain.Present(0, DXGI_PRESENT(0)).ok()?;
         }
         Ok(())
     }
 
     fn clear_overlay(&self) -> Result<()> {
-        for panel in &self.panels {
-            panel.update(&self.device, |target| unsafe {
-                clear_target(&self.context, target)
-            })?;
+        unsafe {
+            self.context
+                .ClearRenderTargetView(&self.render_target, &[0.0, 0.0, 0.0, 0.0]);
+            self.swap_chain.Present(0, DXGI_PRESENT(0)).ok()?;
         }
-        unsafe { self.composition.Commit() }
-    }
-
-    fn sync_panels(&mut self, scene: &SceneGeometry) -> Result<()> {
-        let rects: Vec<_> = ambient_regions(scene.clear_rect, self.width, self.height)
-            .into_iter()
-            .filter(|rect| !rect.is_empty())
-            .collect();
-        if self
-            .panels
-            .iter()
-            .map(|panel| panel.rect)
-            .eq(rects.iter().copied())
-        {
-            return Ok(());
-        }
-        unsafe { self.root.RemoveAllVisuals()? };
-        self.panels.clear();
-        for rect in rects {
-            let panel = self.create_panel(rect)?;
-            self.panels.push(panel);
-        }
-        unsafe { self.composition.Commit()? };
-        self.up_to_date = false;
         Ok(())
     }
-
-    fn create_panel(&self, rect: ScreenRect) -> Result<Panel> {
-        unsafe {
-            let surface = self.composition.CreateSurface(
-                (rect.right - rect.left) as u32,
-                (rect.bottom - rect.top) as u32,
-                DXGI_FORMAT_B8G8R8A8_UNORM,
-                DXGI_ALPHA_MODE_PREMULTIPLIED,
-            )?;
-            let visual = self.composition.CreateVisual()?;
-            visual.SetContent(&surface)?;
-            visual.SetOffsetX2(rect.left as f32)?;
-            visual.SetOffsetY2(rect.top as f32)?;
-            self.root
-                .AddVisual(&visual, true, None::<&IDCompositionVisual>)?;
-            let panel = Panel {
-                rect,
-                surface,
-                _visual: visual,
-            };
-            panel.update(&self.device, |target| clear_target(&self.context, target))?;
-            Ok(panel)
-        }
-    }
-}
-
-impl Panel {
-    /// DirectComposition allows only one surface to be open for drawing at a time.
-    fn update(
-        &self,
-        device: &ID3D11Device,
-        draw: impl FnOnce(&CompositeTarget<'_>) -> Result<()>,
-    ) -> Result<()> {
-        unsafe {
-            let mut offset = POINT::default();
-            let texture: ID3D11Texture2D = self.surface.BeginDraw(None, &mut offset)?;
-            let mut view = None;
-            let drawn = device
-                .CreateRenderTargetView(&texture, None, Some(&mut view))
-                .and_then(|()| view.ok_or_else(Error::from_win32))
-                .and_then(|view| {
-                    draw(&CompositeTarget {
-                        view: &view,
-                        rect: self.rect,
-                        offset: [offset.x, offset.y],
-                    })
-                });
-            let ended = self.surface.EndDraw();
-            drawn.and(ended)
-        }
-    }
-}
-
-unsafe fn clear_target(context: &ID3D11DeviceContext, target: &CompositeTarget<'_>) -> Result<()> {
-    let [x, y] = target.offset;
-    let area = RECT {
-        left: x,
-        top: y,
-        right: x + target.rect.right - target.rect.left,
-        bottom: y + target.rect.bottom - target.rect.top,
-    };
-    unsafe {
-        context
-            .cast::<ID3D11DeviceContext1>()?
-            .ClearView(target.view, &[0.0; 4], Some(&[area]));
-    }
-    Ok(())
 }
 
 unsafe fn draw_ambient(pass: AmbientPass<'_>) -> Result<()> {
-    unsafe {
-        draw_glow(&pass);
-        for target in pass.targets {
-            draw_composite(&pass, target)?;
-        }
-    }
-    Ok(())
-}
-
-impl AmbientPass<'_> {
-    fn pipeline(&self) -> FullscreenPipeline<'_> {
-        FullscreenPipeline {
-            context: self.context,
-            vertex_shader: &self.shaders.vertex,
-            scene_buffer: self.scene_buffer,
-            sampler: &self.shaders.sampler,
-            rasterizer: &self.shaders.rasterizer,
-        }
-    }
-}
-
-/// Everything before the composite, which only `draw_composite` writes to the overlay.
-unsafe fn draw_glow(pass: &AmbientPass<'_>) {
-    let &AmbientPass {
+    let AmbientPass {
         context,
+        render_target,
         scene_buffer,
         scene,
         blur,
@@ -1171,7 +1043,6 @@ unsafe fn draw_glow(pass: &AmbientPass<'_>) {
         shaders,
         width,
         height,
-        ..
     } = pass;
     unsafe {
         context.UpdateSubresource(
@@ -1183,15 +1054,26 @@ unsafe fn draw_glow(pass: &AmbientPass<'_>) {
             0,
         );
         let regions = ambient_regions(scene.clear_rect, width, height);
+        let screen_scissors = regions.map(|region| RECT {
+            left: region.left,
+            top: region.top,
+            right: region.right,
+            bottom: region.bottom,
+        });
         let glow_scissors = glow_scissors(&regions, scene, blur);
-        let pipeline = pass.pipeline();
+        let pipeline = FullscreenPipeline {
+            context,
+            vertex_shader: &shaders.vertex,
+            scene_buffer,
+            sampler: &shaders.sampler,
+            rasterizer: &shaders.rasterizer,
+        };
         // The edge blend reads the prefilter's mips anywhere near the bars, so it covers the
         // whole screen. It's the cheapest pass.
         draw_fullscreen_pass(
             &pipeline,
             FullscreenPass {
                 render_target: &blur.prefilter.render_target,
-                origin: [0, 0],
                 width: blur.prefilter_width,
                 height: blur.prefilter_height,
                 pixel_shader: &shaders.prepare,
@@ -1211,7 +1093,6 @@ unsafe fn draw_glow(pass: &AmbientPass<'_>) {
                 &pipeline,
                 FullscreenPass {
                     render_target: &target.render_target,
-                    origin: [0, 0],
                     width: blur.width,
                     height: blur.height,
                     pixel_shader,
@@ -1252,46 +1133,12 @@ unsafe fn draw_glow(pass: &AmbientPass<'_>) {
                 None,
             ],
         );
-    }
-}
 
-unsafe fn draw_composite(pass: &AmbientPass<'_>, target: &CompositeTarget<'_>) -> Result<()> {
-    let &AmbientPass {
-        context,
-        scene_buffer,
-        scene,
-        blur,
-        source,
-        shaders,
-        width,
-        height,
-        ..
-    } = pass;
-    let rect = target.rect;
-    let origin = [rect.left - target.offset[0], rect.top - target.offset[1]];
-    let local = |region: ScreenRect| RECT {
-        left: region.left.max(rect.left) - origin[0],
-        top: region.top.max(rect.top) - origin[1],
-        right: region.right.min(rect.right) - origin[0],
-        bottom: region.bottom.min(rect.bottom) - origin[1],
-    };
-    unsafe {
-        let mut constants = scene.constants;
-        constants.target_origin = [origin[0] as f32, origin[1] as f32];
-        context.UpdateSubresource(
-            scene_buffer,
-            0,
-            None,
-            &constants as *const SceneConstants as *const std::ffi::c_void,
-            0,
-            0,
-        );
-        clear_target(context, target)?;
+        context.ClearRenderTargetView(render_target, &[0.0, 0.0, 0.0, 0.0]);
         draw_fullscreen_pass(
-            &pass.pipeline(),
+            &pipeline,
             FullscreenPass {
-                render_target: target.view,
-                origin,
+                render_target,
                 width,
                 height,
                 pixel_shader: &shaders.composite,
@@ -1301,7 +1148,7 @@ unsafe fn draw_composite(pass: &AmbientPass<'_>, target: &CompositeTarget<'_>) -
                     None,
                     Some(blur.prefilter.view.clone()),
                 ],
-                scissors: &ambient_regions(scene.clear_rect, width, height).map(local),
+                scissors: &screen_scissors,
             },
         );
     }
@@ -1349,9 +1196,6 @@ struct FullscreenPipeline<'a> {
 
 struct FullscreenPass<'a> {
     render_target: &'a ID3D11RenderTargetView,
-    /// The position, in the pass's coordinates, of the target's (0, 0); `width` and `height` span
-    /// the whole pass.
-    origin: [i32; 2],
     width: u32,
     height: u32,
     pixel_shader: &'a ID3D11PixelShader,
@@ -1366,8 +1210,8 @@ unsafe fn draw_fullscreen_pass(pipeline: &FullscreenPipeline<'_>, pass: Fullscre
             None::<&ID3D11DepthStencilView>,
         );
         pipeline.context.RSSetViewports(Some(&[D3D11_VIEWPORT {
-            TopLeftX: -pass.origin[0] as f32,
-            TopLeftY: -pass.origin[1] as f32,
+            TopLeftX: 0.0,
+            TopLeftY: 0.0,
             Width: pass.width as f32,
             Height: pass.height as f32,
             MinDepth: 0.0,
@@ -1523,8 +1367,6 @@ mod tests {
     thread_local! {
         /// Runs the glow passes over the whole screen instead of just around the bars.
         pub(super) static GLOW_EVERYWHERE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-        /// Composites into one target per bar, as the overlay does, instead of one screen-sized one.
-        static PANELLED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     }
 
     fn test_scene(rect: ScreenRect, edge_blend: u32, edge_softness: u32) -> SceneGeometry {
@@ -1540,7 +1382,7 @@ mod tests {
                 sample_rect: [sample.left, sample.top, sample.right, sample.bottom],
                 edge_inset: edge_inset as f32,
                 glow_downsample: TEST_BLUR_SCALE as f32,
-                target_origin: [0.0; 2],
+                _padding: [0.0; 2],
                 blur_sigma: 1.5,
                 blur_radius: 5.0,
                 edge_blend: edge_blend as f32,
@@ -1678,7 +1520,7 @@ mod tests {
 
             draw_ambient(AmbientPass {
                 context: &context,
-                targets: &[CompositeTarget::whole_screen(&render_target, WIDTH, HEIGHT)],
+                render_target: &render_target,
                 scene_buffer: &scene_buffer,
                 scene: &scene,
                 blur: &blur,
@@ -1781,80 +1623,30 @@ mod tests {
             device
                 .CreateShaderResourceView(&source.unwrap(), None, Some(&mut source_view))
                 .unwrap();
+            let mut output = None;
+            device
+                .CreateTexture2D(
+                    &D3D11_TEXTURE2D_DESC {
+                        BindFlags: D3D11_BIND_RENDER_TARGET.0 as u32,
+                        ..desc
+                    },
+                    None,
+                    Some(&mut output),
+                )
+                .unwrap();
+            let output: ID3D11Texture2D = output.unwrap();
+            let mut render_target = None;
+            device
+                .CreateRenderTargetView(&output, None, Some(&mut render_target))
+                .unwrap();
             let scene =
                 SceneGeometry::with_blur_scale(width, height, aspect_ratio, effect, blur_scale)
                     .unwrap();
-            let rects: Vec<ScreenRect> = if PANELLED.with(std::cell::Cell::get) {
-                ambient_regions(scene.clear_rect, width, height)
-                    .into_iter()
-                    .filter(|rect| !rect.is_empty())
-                    .collect()
-            } else {
-                vec![ScreenRect {
-                    left: 0,
-                    top: 0,
-                    right: width as i32,
-                    bottom: height as i32,
-                }]
-            };
-            // Panels draw at an offset inside a larger texture, like a DirectComposition atlas, whose
-            // other pixels must be left alone.
-            let (offset, padding) = if PANELLED.with(std::cell::Cell::get) {
-                ([3, 5], [7, 9])
-            } else {
-                ([0, 0], [0, 0])
-            };
-            const UNTOUCHED: [u8; 4] = [255, 0, 255, 255];
-            let size = |rect: &ScreenRect| {
-                (
-                    (rect.right - rect.left) as u32 + padding[0],
-                    (rect.bottom - rect.top) as u32 + padding[1],
-                )
-            };
-            let outputs: Vec<(ID3D11Texture2D, ID3D11RenderTargetView)> = rects
-                .iter()
-                .map(|rect| {
-                    let (width, height) = size(rect);
-                    let mut output = None;
-                    device
-                        .CreateTexture2D(
-                            &D3D11_TEXTURE2D_DESC {
-                                Width: width,
-                                Height: height,
-                                BindFlags: D3D11_BIND_RENDER_TARGET.0 as u32,
-                                ..desc
-                            },
-                            None,
-                            Some(&mut output),
-                        )
-                        .unwrap();
-                    let output: ID3D11Texture2D = output.unwrap();
-                    let mut render_target = None;
-                    device
-                        .CreateRenderTargetView(&output, None, Some(&mut render_target))
-                        .unwrap();
-                    let render_target = render_target.unwrap();
-                    context.ClearRenderTargetView(
-                        &render_target,
-                        &UNTOUCHED.map(|c| c as f32 / 255.0),
-                    );
-                    (output, render_target)
-                })
-                .collect();
-            let targets: Vec<_> = rects
-                .iter()
-                .zip(&outputs)
-                .map(|(rect, (_, view))| CompositeTarget {
-                    view,
-                    rect: *rect,
-                    offset,
-                })
-                .collect();
             let blur = BlurTargets::new(device, width, height, scene.blur_scale).unwrap();
             let scene_buffer = create_scene_buffer(device).unwrap();
             draw_ambient(AmbientPass {
                 context,
-                targets: &targets,
+                render_target: &render_target.unwrap(),
                 scene_buffer: &scene_buffer,
                 scene: &scene,
                 blur: &blur,
@@ -1864,54 +1656,34 @@ mod tests {
                 height,
             })
             .unwrap();
-            let mut result = vec![0u8; (width * height * 4) as usize];
-            for (rect, (output, _)) in rects.iter().zip(&outputs) {
-                let (target_width, target_height) = size(rect);
-                let mut staging = None;
-                device
-                    .CreateTexture2D(
-                        &D3D11_TEXTURE2D_DESC {
-                            Width: target_width,
-                            Height: target_height,
-                            Usage: D3D11_USAGE_STAGING,
-                            BindFlags: 0,
-                            CPUAccessFlags: D3D11_CPU_ACCESS_READ.0 as u32,
-                            ..desc
-                        },
-                        None,
-                        Some(&mut staging),
-                    )
-                    .unwrap();
-                let staging: ID3D11Texture2D = staging.unwrap();
-                context.CopyResource(&staging, output);
-                let mut mapped =
-                    windows::Win32::Graphics::Direct3D11::D3D11_MAPPED_SUBRESOURCE::default();
-                context
-                    .Map(&staging, 0, D3D11_MAP_READ, 0, Some(&mut mapped))
-                    .unwrap();
-                let inner_width = (rect.right - rect.left) as usize;
-                let inner_height = (rect.bottom - rect.top) as usize;
-                let [left, top] = offset.map(|value| value as usize);
-                for y in 0..target_height as usize {
-                    let row = std::slice::from_raw_parts(
-                        mapped.pData.cast::<u8>().add(y * mapped.RowPitch as usize),
-                        target_width as usize * 4,
-                    );
-                    for (x, pixel) in row.chunks(4).enumerate() {
-                        if (left..left + inner_width).contains(&x)
-                            && (top..top + inner_height).contains(&y)
-                        {
-                            let screen_x = rect.left as usize + x - left;
-                            let screen_y = rect.top as usize + y - top;
-                            let start = (screen_y * width as usize + screen_x) * 4;
-                            result[start..start + 4].copy_from_slice(pixel);
-                        } else {
-                            assert_eq!(pixel, UNTOUCHED, "drew outside its target at ({x}, {y})");
-                        }
-                    }
-                }
-                context.Unmap(&staging, 0);
+            let mut staging = None;
+            device
+                .CreateTexture2D(
+                    &D3D11_TEXTURE2D_DESC {
+                        Usage: D3D11_USAGE_STAGING,
+                        BindFlags: 0,
+                        CPUAccessFlags: D3D11_CPU_ACCESS_READ.0 as u32,
+                        ..desc
+                    },
+                    None,
+                    Some(&mut staging),
+                )
+                .unwrap();
+            let staging: ID3D11Texture2D = staging.unwrap();
+            context.CopyResource(&staging, &output);
+            let mut mapped =
+                windows::Win32::Graphics::Direct3D11::D3D11_MAPPED_SUBRESOURCE::default();
+            context
+                .Map(&staging, 0, D3D11_MAP_READ, 0, Some(&mut mapped))
+                .unwrap();
+            let mut result = Vec::with_capacity((width * height * 4) as usize);
+            for y in 0..height as usize {
+                result.extend_from_slice(std::slice::from_raw_parts(
+                    mapped.pData.cast::<u8>().add(y * mapped.RowPitch as usize),
+                    width as usize * 4,
+                ));
             }
+            context.Unmap(&staging, 0);
             result
         }
     }
@@ -1957,54 +1729,6 @@ mod tests {
             }
         }
         GLOW_EVERYWHERE.with(|flag| flag.set(false));
-    }
-
-    #[test]
-    fn compositing_per_bar_matches_compositing_the_whole_screen() {
-        let (device, context) = create_device(None, D3D_DRIVER_TYPE_WARP).unwrap();
-        let shaders = AmbientShaders::new(&device).unwrap();
-        for screen in [(480, 200), (333, 251)] {
-            let picture = noise_picture(screen.0, screen.1);
-            for (width, height) in [(16, 9), (4, 3), (32, 9), (1, 1)] {
-                let aspect_ratio = AspectRatio::new(width, height).unwrap();
-                for effect in [
-                    EffectSettings::default(),
-                    EffectSettings {
-                        edge_softness: 0,
-                        edge_blend: 0,
-                        ..EffectSettings::default()
-                    },
-                ] {
-                    let render = |panelled: bool| {
-                        PANELLED.with(|flag| flag.set(panelled));
-                        render_overlay(
-                            &device,
-                            &context,
-                            &shaders,
-                            screen,
-                            &picture,
-                            aspect_ratio,
-                            effect,
-                            BlurScale::new(effect.resolution.scale()),
-                        )
-                    };
-                    let whole = render(false);
-                    let panels = render(true);
-                    // The offset viewport can round a texture coordinate differently in the last bit.
-                    let worst = whole
-                        .iter()
-                        .zip(&panels)
-                        .map(|(a, b)| a.abs_diff(*b))
-                        .max()
-                        .unwrap_or(0);
-                    assert!(
-                        worst <= 1,
-                        "{screen:?} {width}:{height} {effect:?} differs by {worst} when composited per bar"
-                    );
-                }
-            }
-        }
-        PANELLED.with(|flag| flag.set(false));
     }
 
     /// Compares Full as it was (everything at full resolution) against Full now (glow at half)
