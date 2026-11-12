@@ -4,12 +4,9 @@ mod geometry;
 mod settings;
 
 #[cfg(windows)]
-#[allow(dead_code)]
-// Retained Win32 settings helpers are no longer used by the GPUI Settings process.
 mod app;
 
 #[cfg(windows)]
-#[allow(dead_code)]
 mod app_icon;
 
 #[cfg(windows)]
