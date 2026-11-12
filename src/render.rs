@@ -77,7 +77,6 @@ pub struct Renderer {
     scene: SceneGeometry,
     gpu: Option<Gpu>,
     rebuild_retry: CaptureRetry,
-    /// None when hiding the idle cursor is turned off.
     idle_cursor: Option<IdleCursor>,
     _window: OverlayWindow,
 }
@@ -158,7 +157,7 @@ impl BlurScale {
 }
 
 struct SceneGeometry {
-    /// The picture, in screen pixels; everything else on the screen is bars.
+    /// The picture, in screen pixels.
     content: ScreenRect,
     /// The content minus the edge the edge blend covers: sampled, and never drawn over.
     clear_rect: ScreenRect,
@@ -610,7 +609,6 @@ impl Renderer {
         if !hide {
             self.idle_cursor = None;
         } else if self.idle_cursor.is_none() {
-            // Not worth failing the effect over; the cursor just stays visible.
             self.idle_cursor = IdleCursor::new().ok();
         }
     }
@@ -1601,7 +1599,6 @@ mod tests {
         }
     }
 
-    /// A busy, noisy RGBA picture.
     fn noise_picture(width: u32, height: u32) -> Vec<u8> {
         let mut seed = 0x9e37_79b9u32;
         (0..width * height)
@@ -1620,7 +1617,6 @@ mod tests {
             .collect()
     }
 
-    /// Renders the overlay for an RGBA `picture` filling a `width` x `height` screen.
     #[allow(clippy::too_many_arguments)]
     fn render_overlay(
         device: &ID3D11Device,
@@ -2070,9 +2066,7 @@ mod tests {
         let half = render(Some(0.5));
         let off = render(Some(0.0));
         let pixel = |scene: &[[u8; 4]], x: u32, y: u32| scene[(y * WIDTH + x) as usize];
-        // Far out in the glow, inside the edge blend band, right next to the picture (where a
-        // ramp would leave a lighter rim), the edge softness strip over the picture's edge (left
-        // at full, it shows as a line), and in the top bar.
+        // Far bar, edge blend, next to the picture, edge softness strip, top bar.
         for (x, y) in [(1, 12), (5, 12), (7, 12), (8, 12), (20, 1), (20, 3)] {
             let (full, half, off) = (pixel(&full, x, y), pixel(&half, x, y), pixel(&off, x, y));
             assert!(

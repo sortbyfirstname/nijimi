@@ -271,9 +271,7 @@ float4 PSComposite(VertexOutput input) : SV_TARGET
         color = blendEdge(input.uv, color, inside);
     else if (inside)
         return 0.0;
-    // The bars dim evenly, edge blend included. The edge softness strip over the picture dims
-    // too: it fades in across the strip, so the picture's edge eases down to the bars'
-    // brightness. Left at full, it shows as a lighter line; a ramp in the bars shows as a rim.
+    // Includes the edge softness strip over the picture; left at full, it shows as a light line.
     color.rgb *= barBrightness;
     color.rgb += dither(input.position.xy) / 255.0 * color.a;
     color.rgb = clamp(color.rgb, 0.0, color.a);

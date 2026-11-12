@@ -97,7 +97,6 @@ pub struct EffectSettings {
     pub edge_blend: u8,
     pub blur: u8,
     pub resolution: BlurResolution,
-    /// Scales the glow; 100 is as bright as the picture it comes from.
     pub brightness: u8,
 }
 
@@ -171,7 +170,6 @@ pub struct AppSettings {
     pub default_effect: EffectSettings,
     pub always_on: bool,
     pub show_in_screenshots: bool,
-    /// Hides the cursor once it rests in a bar while the effect is on.
     pub hide_idle_cursor: bool,
     pub frame_rate: FrameRate,
     pub profiles: Vec<AppProfile>,

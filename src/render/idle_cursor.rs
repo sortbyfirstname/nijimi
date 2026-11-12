@@ -18,9 +18,8 @@ const WINDOW_CLASS: windows::core::PCWSTR = w!("NijimiIdleCursorWindow");
 const IDLE_DELAY: Duration = Duration::from_secs(2);
 static CLASS_REGISTERED: OnceLock<()> = OnceLock::new();
 
-/// Hides the cursor once it rests in a bar, by putting a 1x1 invisible window of nijimi's own
-/// under it that shows no cursor. Any movement takes the pointer off that pixel and Windows
-/// shows the cursor again; nothing system-wide changes, and closing nijimi destroys the window.
+/// Hides a cursor resting in a bar under a 1x1 window of nijimi's own that shows no cursor, so
+/// nothing system-wide changes. Any movement takes the pointer off that pixel.
 pub(super) struct IdleCursor {
     hwnd: HWND,
     last_position: Option<POINT>,
@@ -72,7 +71,6 @@ impl IdleCursor {
         }
     }
 
-    /// Called on each frame tick while the glow is on.
     pub(super) fn update(&mut self, content: ScreenRect, width: u32, height: u32) {
         let mut position = POINT::default();
         if unsafe { GetCursorPos(&mut position) }.is_err() {
@@ -80,7 +78,7 @@ impl IdleCursor {
             return;
         }
         let now = Instant::now();
-        // The window hides itself on a click or scroll; count that as activity.
+        // A click or scroll hides the window; count it as activity.
         let clicked = self.hiding && !unsafe { IsWindowVisible(self.hwnd) }.as_bool();
         if clicked || self.last_position != Some(position) {
             self.last_position = Some(position);
