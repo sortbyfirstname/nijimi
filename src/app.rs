@@ -179,6 +179,7 @@ pub fn run(show_settings: bool) -> Result<()> {
         }
         let mut renderer = Renderer::new()?;
         renderer.set_capturable(settings.show_in_screenshots)?;
+        renderer.set_hide_idle_cursor(settings.hide_idle_cursor);
         let state = OwnedState(Box::into_raw(Box::new(AppState {
             hwnd: HWND::default(),
             renderer,
@@ -383,6 +384,9 @@ unsafe extern "system" fn window_proc(
             match AppSettings::load(&state.settings_path) {
                 Ok((settings, warning)) => {
                     errors.extend(warning);
+                    state
+                        .renderer
+                        .set_hide_idle_cursor(settings.hide_idle_cursor);
                     if let Err(error) = state.renderer.set_capturable(settings.show_in_screenshots)
                     {
                         errors.push(format!(

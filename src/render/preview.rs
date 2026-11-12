@@ -333,6 +333,7 @@ mod tests {
             edge_blend: 0,
             blur: 50,
             resolution: BlurResolution::Quarter,
+            ..EffectSettings::default()
         };
         let image = preview
             .render(3440, 1440, AspectRatio::new(16, 9).unwrap(), effect)

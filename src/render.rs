@@ -47,6 +47,7 @@ use crate::geometry::{
     AspectRatio, ScreenRect, ambient_regions, content_bounds, fit_content, inset_bar_edges,
 };
 use crate::settings::EffectSettings;
+use idle_cursor::IdleCursor;
 
 const WINDOW_CLASS: windows::core::PCWSTR = w!("NijimiOverlayWindow");
 /// Effect sizes at 100%, as fractions of the screen's shorter side.
@@ -76,6 +77,8 @@ pub struct Renderer {
     scene: SceneGeometry,
     gpu: Option<Gpu>,
     rebuild_retry: CaptureRetry,
+    /// None when hiding the idle cursor is turned off.
+    idle_cursor: Option<IdleCursor>,
     _window: OverlayWindow,
 }
 
@@ -114,7 +117,8 @@ struct SceneConstants {
     downsample: f32,
     edge_inset: f32,
     glow_downsample: f32,
-    _padding: [f32; 2],
+    bar_brightness: f32,
+    _padding: f32,
 }
 
 impl Default for SceneConstants {
@@ -128,7 +132,8 @@ impl Default for SceneConstants {
             downsample: 4.0,
             edge_inset: 0.0,
             glow_downsample: 4.0,
-            _padding: [0.0; 2],
+            bar_brightness: 1.0,
+            _padding: 0.0,
         }
     }
 }
@@ -153,6 +158,8 @@ impl BlurScale {
 }
 
 struct SceneGeometry {
+    /// The picture, in screen pixels; everything else on the screen is bars.
+    content: ScreenRect,
     /// The content minus the edge the edge blend covers: sampled, and never drawn over.
     clear_rect: ScreenRect,
     blur_scale: BlurScale,
@@ -201,6 +208,7 @@ impl SceneGeometry {
         let blur_sigma =
             strength(effect.blur) * MAX_BLUR_SIGMA * shorter_side / blur_scale.glow as f32;
         Some(Self {
+            content: rect,
             clear_rect,
             blur_scale,
             constants: SceneConstants {
@@ -214,7 +222,8 @@ impl SceneGeometry {
                 downsample: blur_scale.prefilter as f32,
                 edge_inset: edge_inset as f32,
                 glow_downsample: blur_scale.glow as f32,
-                _padding: [0.0; 2],
+                bar_brightness: strength(effect.brightness),
+                _padding: 0.0,
             },
         })
     }
@@ -591,8 +600,24 @@ impl Renderer {
                 scene,
                 gpu: None,
                 rebuild_retry: CaptureRetry::default(),
+                idle_cursor: None,
                 _window: window,
             })
+        }
+    }
+
+    pub fn set_hide_idle_cursor(&mut self, hide: bool) {
+        if !hide {
+            self.idle_cursor = None;
+        } else if self.idle_cursor.is_none() {
+            // Not worth failing the effect over; the cursor just stays visible.
+            self.idle_cursor = IdleCursor::new().ok();
+        }
+    }
+
+    fn reset_idle_cursor(&mut self) {
+        if let Some(idle_cursor) = &mut self.idle_cursor {
+            idle_cursor.reset();
         }
     }
 
@@ -623,6 +648,7 @@ impl Renderer {
             // Hide first so the last frame never shows; the next activation starts cleared.
             let _ = unsafe { ShowWindow(self.hwnd, SW_HIDE) };
             self.gpu = None;
+            self.reset_idle_cursor();
             return;
         }
         self.rebuild_retry.reset();
@@ -658,6 +684,7 @@ impl Renderer {
     pub fn pause(&mut self) {
         self.enabled = false;
         let _ = unsafe { ShowWindow(self.hwnd, SW_HIDE) };
+        self.reset_idle_cursor();
         let Some(gpu) = self.gpu.as_mut() else {
             return;
         };
@@ -685,6 +712,7 @@ impl Renderer {
     pub fn refresh(&mut self, enabled: bool) -> Result<()> {
         self.set_enabled(false);
         let mut replacement = Self::with_options(self.aspect_ratio, self.effect, self.capturable)?;
+        replacement.set_hide_idle_cursor(self.idle_cursor.is_some());
         replacement.set_enabled(enabled);
         *self = replacement;
         Ok(())
@@ -693,6 +721,9 @@ impl Renderer {
     pub fn render(&mut self) -> Result<()> {
         if !self.enabled {
             return Ok(());
+        }
+        if let Some(idle_cursor) = &mut self.idle_cursor {
+            idle_cursor.update(self.scene.content, self.width, self.height);
         }
         self.stay_above_foreground();
         let width = unsafe {
@@ -1320,6 +1351,7 @@ unsafe fn create_pixel_shader(device: &ID3D11Device, bytecode: &[u8]) -> Result<
     shader.ok_or_else(Error::from_win32)
 }
 
+mod idle_cursor;
 mod preview;
 
 #[cfg(test)]
@@ -1351,6 +1383,7 @@ mod tests {
         spatial_gradient: bool,
         edge_blend: u32,
         edge_softness: u32,
+        bar_brightness: Option<f32>,
     }
 
     const TEST_BLUR_SCALE: u32 = 4;
@@ -1375,6 +1408,7 @@ mod tests {
         let clear_rect = inset_bar_edges(rect, WIDTH, HEIGHT, edge_inset);
         let sample = content_bounds(clear_rect, WIDTH, HEIGHT).unwrap();
         SceneGeometry {
+            content: rect,
             clear_rect,
             blur_scale: BlurScale::new(TEST_BLUR_SCALE),
             constants: SceneConstants {
@@ -1382,7 +1416,8 @@ mod tests {
                 sample_rect: [sample.left, sample.top, sample.right, sample.bottom],
                 edge_inset: edge_inset as f32,
                 glow_downsample: TEST_BLUR_SCALE as f32,
-                _padding: [0.0; 2],
+                bar_brightness: 1.0,
+                _padding: 0.0,
                 blur_sigma: 1.5,
                 blur_radius: 5.0,
                 edge_blend: edge_blend as f32,
@@ -1514,7 +1549,10 @@ mod tests {
             let render_target = render_target.ok_or_else(Error::from_win32)?;
 
             let blur = BlurTargets::new(&device, WIDTH, HEIGHT, BlurScale::new(TEST_BLUR_SCALE))?;
-            let scene = test_scene(content, pattern.edge_blend, pattern.edge_softness);
+            let mut scene = test_scene(content, pattern.edge_blend, pattern.edge_softness);
+            if let Some(brightness) = pattern.bar_brightness {
+                scene.constants.bar_brightness = brightness;
+            }
             let scene_buffer = create_scene_buffer(&device)?;
             let shaders = AmbientShaders::new(&device)?;
 
@@ -1704,6 +1742,7 @@ mod tests {
                             edge_blend: blend,
                             blur,
                             resolution,
+                            ..EffectSettings::default()
                         };
                         let render = |everywhere: bool| {
                             GLOW_EVERYWHERE.with(|flag| flag.set(everywhere));
@@ -1755,6 +1794,7 @@ mod tests {
                     edge_blend: blend,
                     blur,
                     resolution: crate::settings::BlurResolution::Full,
+                    ..EffectSettings::default()
                 };
                 let render = |glow| {
                     render_overlay(
@@ -2010,6 +2050,51 @@ mod tests {
     }
 
     #[test]
+    fn brightness_dims_the_bars_and_the_softened_picture_edge() {
+        let content = ScreenRect {
+            left: 8,
+            top: 4,
+            right: 32,
+            bottom: 20,
+        };
+        let render = |bar_brightness| {
+            let pattern = TestPattern {
+                bar_brightness,
+                edge_blend: 6,
+                ..TestPattern::default()
+            };
+            render_scene_with_frame(content, [0, 0, 0, 255], [160, 120, 80, 255], false, pattern)
+                .unwrap()
+        };
+        let full = render(None);
+        let half = render(Some(0.5));
+        let off = render(Some(0.0));
+        let pixel = |scene: &[[u8; 4]], x: u32, y: u32| scene[(y * WIDTH + x) as usize];
+        // Far out in the glow, inside the edge blend band, right next to the picture (where a
+        // ramp would leave a lighter rim), the edge softness strip over the picture's edge (left
+        // at full, it shows as a line), and in the top bar.
+        for (x, y) in [(1, 12), (5, 12), (7, 12), (8, 12), (20, 1), (20, 3)] {
+            let (full, half, off) = (pixel(&full, x, y), pixel(&half, x, y), pixel(&off, x, y));
+            assert!(
+                full[..3].iter().any(|&channel| channel > 20),
+                "({x}, {y}) should glow"
+            );
+            assert_eq!(full[3], half[3], "coverage stays the same at ({x}, {y})");
+            for channel in 0..3 {
+                let expected = full[channel] as i32 / 2;
+                assert!(
+                    (half[channel] as i32 - expected).abs() <= 1,
+                    "channel {channel} at ({x}, {y}): {} should be about half of {}",
+                    half[channel],
+                    full[channel]
+                );
+                assert!(off[channel] <= 1, "({x}, {y}) should be black at 0%");
+            }
+        }
+        assert_eq!(pixel(&half, 20, 12), [0, 0, 0, 0], "content stays clear");
+    }
+
+    #[test]
     fn bright_margin_pixels_do_not_change_reflected_ambient_colors() {
         let content = ScreenRect {
             left: 8,
@@ -2144,6 +2229,7 @@ mod tests {
             edge_blend,
             blur,
             resolution,
+            ..EffectSettings::default()
         };
         let quarter = SceneGeometry::new(
             3440,

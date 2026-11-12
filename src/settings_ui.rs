@@ -260,6 +260,7 @@ struct SettingsView {
     edge_softness: Entity<SliderState>,
     edge_blend: Entity<SliderState>,
     blur: Entity<SliderState>,
+    brightness: Entity<SliderState>,
     preview: PreviewState,
     search_query: String,
     suppress_ratio_events: bool,
@@ -290,16 +291,18 @@ impl SettingsView {
         let edge_softness = cx.new(|_| strength_slider(initial_effect.edge_softness));
         let edge_blend = cx.new(|_| strength_slider(initial_effect.edge_blend));
         let blur = cx.new(|_| strength_slider(initial_effect.blur));
-        let slider_subscriptions = [&edge_softness, &edge_blend, &blur].map(|slider| {
-            cx.subscribe_in(
-                slider,
-                window,
-                |this, _, event: &SliderEvent, window, cx| match event {
-                    SliderEvent::Change(_) => cx.notify(),
-                    SliderEvent::Release(_) => this.save_effect_sliders(window, cx),
-                },
-            )
-        });
+        let brightness = cx.new(|_| strength_slider(initial_effect.brightness));
+        let slider_subscriptions =
+            [&edge_softness, &edge_blend, &blur, &brightness].map(|slider| {
+                cx.subscribe_in(
+                    slider,
+                    window,
+                    |this, _, event: &SliderEvent, window, cx| match event {
+                        SliderEvent::Change(_) => cx.notify(),
+                        SliderEvent::Release(_) => this.save_effect_sliders(window, cx),
+                    },
+                )
+            });
 
         let search_subscription = cx.subscribe_in(&search, window, |this, input, event, _, cx| {
             if matches!(event, InputEvent::Change) {
@@ -341,6 +344,7 @@ impl SettingsView {
             edge_softness,
             edge_blend,
             blur,
+            brightness,
             preview: PreviewState {
                 screen_size: primary_screen_size(),
                 ..PreviewState::default()
@@ -396,6 +400,7 @@ impl SettingsView {
             effect.edge_softness = slider_strength(self.edge_softness.read(cx));
             effect.edge_blend = slider_strength(self.edge_blend.read(cx));
             effect.blur = slider_strength(self.blur.read(cx));
+            effect.brightness = slider_strength(self.brightness.read(cx));
         }
         Some((aspect_ratio, effect))
     }
@@ -502,6 +507,7 @@ impl SettingsView {
             (&self.edge_softness, effect.edge_softness),
             (&self.edge_blend, effect.edge_blend),
             (&self.blur, effect.blur),
+            (&self.brightness, effect.brightness),
         ] {
             slider.update(cx, |slider, cx| slider.set_value(value as f32, window, cx));
         }
@@ -529,11 +535,13 @@ impl SettingsView {
         let edge_softness = slider_strength(self.edge_softness.read(cx));
         let edge_blend = slider_strength(self.edge_blend.read(cx));
         let blur = slider_strength(self.blur.read(cx));
+        let brightness = slider_strength(self.brightness.read(cx));
         self.update_effect(
             |effect| {
                 effect.edge_softness = edge_softness;
                 effect.edge_blend = edge_blend;
                 effect.blur = blur;
+                effect.brightness = brightness;
             },
             window,
             cx,
@@ -1153,6 +1161,22 @@ impl SettingsView {
             )
             .child(
                 toggle_card(
+                    "Hide idle cursor",
+                    "Hide the mouse cursor after it rests in the bars for 2 seconds. It comes back as soon as you move it.",
+                )
+                .child(
+                    Switch::new("hide-idle-cursor")
+                        .checked(self.settings.hide_idle_cursor)
+                        .on_click(cx.listener(|this, checked: &bool, _, cx| {
+                            this.update_settings(
+                                |settings| settings.hide_idle_cursor = *checked,
+                                cx,
+                            );
+                        })),
+                ),
+            )
+            .child(
+                toggle_card(
                     "Start with Windows",
                     "Launch nijimi in the tray when you sign in.",
                 )
@@ -1384,6 +1408,11 @@ impl SettingsView {
                 "Blur strength",
                 "How far colours spread into the bars.",
                 &self.blur,
+            ))
+            .child(slider_row(
+                "Brightness",
+                "How bright the glow is. At 100% it matches the picture.",
+                &self.brightness,
             ))
             .child(
                 setting_row(

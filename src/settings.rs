@@ -97,6 +97,8 @@ pub struct EffectSettings {
     pub edge_blend: u8,
     pub blur: u8,
     pub resolution: BlurResolution,
+    /// Scales the glow; 100 is as bright as the picture it comes from.
+    pub brightness: u8,
 }
 
 impl Default for EffectSettings {
@@ -106,6 +108,7 @@ impl Default for EffectSettings {
             edge_blend: 60,
             blur: 80,
             resolution: BlurResolution::Quarter,
+            brightness: EffectSettings::MAX_STRENGTH,
         }
     }
 }
@@ -124,6 +127,7 @@ impl EffectSettings {
                 "blend" => effect.edge_blend = parse_strength(value)?,
                 "blur" => effect.blur = parse_strength(value)?,
                 "resolution" => effect.resolution = BlurResolution::from_key(value)?,
+                "brightness" => effect.brightness = parse_strength(value)?,
                 _ => return None,
             }
         }
@@ -131,13 +135,18 @@ impl EffectSettings {
     }
 
     fn serialize(&self) -> String {
-        format!(
+        let mut value = format!(
             "softness={},blend={},blur={},resolution={}",
             self.edge_softness,
             self.edge_blend,
             self.blur,
             self.resolution.key()
-        )
+        );
+        // Omitted at full brightness so builds without the setting can still read the line.
+        if self.brightness != Self::MAX_STRENGTH {
+            value.push_str(&format!(",brightness={}", self.brightness));
+        }
+        value
     }
 }
 
@@ -162,6 +171,8 @@ pub struct AppSettings {
     pub default_effect: EffectSettings,
     pub always_on: bool,
     pub show_in_screenshots: bool,
+    /// Hides the cursor once it rests in a bar while the effect is on.
+    pub hide_idle_cursor: bool,
     pub frame_rate: FrameRate,
     pub profiles: Vec<AppProfile>,
 }
@@ -173,6 +184,7 @@ impl Default for AppSettings {
             default_effect: EffectSettings::default(),
             always_on: false,
             show_in_screenshots: false,
+            hide_idle_cursor: true,
             frame_rate: FrameRate::default(),
             profiles: Vec::new(),
         }
@@ -245,6 +257,7 @@ impl AppSettings {
             "@frame_rate" => self.frame_rate = FrameRate::from_key(executable.trim())?,
             "@always_on" => self.always_on = parse_flag(executable)?,
             "@show_in_screenshots" => self.show_in_screenshots = parse_flag(executable)?,
+            "@hide_idle_cursor" => self.hide_idle_cursor = parse_flag(executable)?,
             _ => {
                 let (ratio, effect) = match ratio.split_once(',') {
                     Some((ratio, effect)) => (ratio, Some(EffectSettings::parse(effect)?)),
@@ -280,6 +293,9 @@ impl AppSettings {
         }
         if self.show_in_screenshots {
             contents.push_str("@show_in_screenshots|1\n");
+        }
+        if !self.hide_idle_cursor {
+            contents.push_str("@hide_idle_cursor|0\n");
         }
         if self.frame_rate != FrameRate::default() {
             contents.push_str(&format!("@frame_rate|{}\n", self.frame_rate.key()));
@@ -914,9 +930,34 @@ mod tests {
             assert_eq!(AppSettings::load(&path).unwrap().0, settings);
         }
 
+        let cursor_shown = AppSettings {
+            hide_idle_cursor: false,
+            ..AppSettings::default()
+        };
+        cursor_shown.save(&path).unwrap();
+        assert_eq!(AppSettings::load(&path).unwrap().0, cursor_shown);
+
         AppSettings::default().save(&path).unwrap();
         assert_eq!(fs::read_to_string(&path).unwrap(), "@global|21:9\n");
         fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn brightness_round_trips_and_is_left_out_at_full() {
+        let dimmed = EffectSettings {
+            brightness: 40,
+            ..EffectSettings::default()
+        };
+        assert!(dimmed.serialize().ends_with(",brightness=40"));
+        assert_eq!(EffectSettings::parse(&dimmed.serialize()), Some(dimmed));
+        assert!(!EffectSettings::default().serialize().contains("brightness"));
+        assert_eq!(
+            EffectSettings::parse("softness=50,blend=60,blur=80,resolution=quarter")
+                .unwrap()
+                .brightness,
+            100
+        );
+        assert!(EffectSettings::parse("brightness=101").is_none());
     }
 
     #[test]
@@ -926,6 +967,7 @@ mod tests {
             edge_blend: 40,
             blur: 70,
             resolution: BlurResolution::Eighth,
+            brightness: 35,
         };
         let mut settings = AppSettings {
             default_effect: EffectSettings {
@@ -958,7 +1000,7 @@ mod tests {
             fs::read_to_string(&path).unwrap(),
             "@global|21:9\n\
              @effect|softness=50,blend=15,blur=80,resolution=quarter\n\
-             16:9,softness=20,blend=40,blur=70,resolution=eighth|C:\\Games\\Custom.exe\n\
+             16:9,softness=20,blend=40,blur=70,resolution=eighth,brightness=35|C:\\Games\\Custom.exe\n\
              4:3|C:\\Games\\Global.exe\n"
         );
         let loaded = AppSettings::load(&path).unwrap().0;
