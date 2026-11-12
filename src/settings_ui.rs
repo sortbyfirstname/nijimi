@@ -12,6 +12,7 @@ use gpui_kit::component::{
     switch::Switch,
     theme::{Theme, ThemeMode},
 };
+use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     Animation, AnimationExt as _, App, AppContext as _, Bounds, ClipboardItem, Context, Entity,
     IntoElement, ObjectFit, ParentElement as _, Render, RenderImage, Styled as _, StyledImage as _,
@@ -781,6 +782,7 @@ impl SettingsView {
                 .label("Program settings")
                 .ghost()
         }
+        .cursor_pointer()
         .on_click(cx.listener(|this, _, window, cx| {
             this.set_page(SettingsPage::Program, window, cx);
         }));
@@ -793,15 +795,17 @@ impl SettingsView {
                 .label("Global settings")
                 .ghost()
         }
+        .cursor_pointer()
         .on_click(cx.listener(|this, _, window, cx| {
             this.set_page(SettingsPage::Global, window, cx);
         }));
-        let about = Button::new("about").label("About").small();
+        let about = Button::new("about").label("About");
         let about = if self.page == SettingsPage::About {
             about.primary()
         } else {
             about.ghost()
         }
+        .cursor_pointer()
         .on_click(cx.listener(|this, _, window, cx| {
             this.set_page(SettingsPage::About, window, cx);
         }));
@@ -878,6 +882,7 @@ impl SettingsView {
                 icon = icon.rounded_sm().bg(rgb(0x3a3a3a));
             }
             let button = Button::new(format!("application-{index}"))
+                .cursor_pointer()
                 .accessibility_label(label.clone())
                 .tooltip(path.to_string_lossy().into_owned())
                 .w_full()
@@ -945,12 +950,14 @@ impl SettingsView {
                 .gap_2()
                 .child(
                     Button::new("browse-app")
+                        .cursor_pointer()
                         .label("Browse…")
                         .ghost()
                         .on_click(cx.listener(|this, _, _, cx| this.browse(cx))),
                 )
                 .child(
                     Button::new("add-selected-app")
+                        .cursor_pointer()
                         .label("Add selected")
                         .primary()
                         .on_click(
@@ -959,6 +966,7 @@ impl SettingsView {
                 )
                 .child(
                     Button::new("refresh-apps")
+                        .cursor_pointer()
                         .accessibility_label(if self.refreshing_apps {
                             "Refreshing apps"
                         } else {
@@ -1003,6 +1011,7 @@ impl SettingsView {
         } else {
             div().child(
                 Button::new("add-app")
+                    .cursor_pointer()
                     .accessibility_label("Add app")
                     .primary()
                     .child(
@@ -1092,6 +1101,7 @@ impl SettingsView {
             .child(self.render_effect_card(cx))
             .child(
                 Button::new("remove-profile")
+                    .cursor_pointer()
                     .label("Remove app")
                     .ghost()
                     .on_click(cx.listener(|this, _, window, cx| this.remove_profile(window, cx))),
@@ -1141,6 +1151,7 @@ impl SettingsView {
                         .flex_shrink_0()
                         .children(FrameRate::ALL.map(|rate| {
                             let button = Button::new(format!("frame-rate-{}", rate.label()))
+                                .cursor_pointer()
                                 .label(rate.label())
                                 .on_click(cx.listener(move |this, _, _, cx| {
                                     this.update_settings(|settings| settings.frame_rate = rate, cx);
@@ -1160,6 +1171,7 @@ impl SettingsView {
                 )
                 .child(
                     Switch::new("always-on")
+                        .cursor_pointer()
                         .checked(self.settings.always_on)
                         .on_click(cx.listener(|this, checked: &bool, _, cx| {
                             this.update_settings(|settings| settings.always_on = *checked, cx);
@@ -1173,6 +1185,7 @@ impl SettingsView {
                 )
                 .child(
                     Switch::new("show-in-screenshots")
+                        .cursor_pointer()
                         .checked(self.settings.show_in_screenshots)
                         .on_click(cx.listener(|this, checked: &bool, _, cx| {
                             this.update_settings(
@@ -1189,6 +1202,7 @@ impl SettingsView {
                 )
                 .child(
                     Switch::new("hide-idle-cursor")
+                        .cursor_pointer()
                         .checked(self.settings.hide_idle_cursor)
                         .on_click(cx.listener(|this, checked: &bool, _, cx| {
                             this.update_settings(
@@ -1205,6 +1219,7 @@ impl SettingsView {
                 )
                 .child(
                     Switch::new("start-with-windows")
+                        .cursor_pointer()
                         .checked(self.start_with_windows)
                         .on_click(cx.listener(|this, checked: &bool, _, cx| {
                             this.set_start_with_windows(*checked, cx);
@@ -1260,6 +1275,7 @@ impl SettingsView {
         };
         let link = |id: &'static str, label: &'static str, url: String| {
             Button::new(id)
+                .cursor_pointer()
                 .label(label)
                 .ghost()
                 .small()
@@ -1333,6 +1349,7 @@ impl SettingsView {
                         )
                         .child(
                             Button::new("copy-system-info")
+                                .cursor_pointer()
                                 .label(if self.copied_system_info {
                                     "Copied"
                                 } else {
@@ -1438,6 +1455,7 @@ impl SettingsView {
                     )))
                     .child(
                         Button::new("confirm-add-app")
+                            .cursor_pointer()
                             .label("Add selected app")
                             .primary()
                             .on_click(
@@ -1455,11 +1473,14 @@ impl SettingsView {
                 "Custom look for this app",
                 "When off, this app follows the look set in Global settings.",
             )
-            .child(Switch::new("custom-effect").checked(editable).on_click(
-                cx.listener(|this, checked: &bool, window, cx| {
-                    this.set_custom_effect(*checked, window, cx);
-                }),
-            ))
+            .child(
+                Switch::new("custom-effect")
+                    .checked(editable)
+                    .cursor_pointer()
+                    .on_click(cx.listener(|this, checked: &bool, window, cx| {
+                        this.set_custom_effect(*checked, window, cx);
+                    })),
+            )
         });
         let slider_row =
             |title: &'static str, description: &'static str, slider: &Entity<SliderState>| {
@@ -1475,7 +1496,8 @@ impl SettingsView {
                             div().flex_1().child(
                                 Slider::new(slider)
                                     .accessibility_label(title)
-                                    .disabled(!editable),
+                                    .disabled(!editable)
+                                    .when(editable, |slider| slider.cursor_pointer()),
                             ),
                         )
                         .child(
@@ -1492,6 +1514,7 @@ impl SettingsView {
             let button = Button::new(format!("blur-resolution-{}", resolution.label()))
                 .label(resolution.label())
                 .disabled(!editable)
+                .when(editable, |button| button.cursor_pointer())
                 .on_click(cx.listener(move |this, _, window, cx| {
                     this.update_effect(|effect| effect.resolution = resolution, window, cx);
                 }));
@@ -1503,6 +1526,7 @@ impl SettingsView {
         });
 
         let reset_target = self.reset_effect_target();
+        let reset_disabled = reset_target.is_none_or(|target| target == effect);
         let reset_button = Button::new("reset-look")
             .label(if self.page == SettingsPage::Global {
                 "Reset to defaults"
@@ -1511,7 +1535,8 @@ impl SettingsView {
             })
             .ghost()
             .small()
-            .disabled(reset_target.is_none_or(|target| target == effect))
+            .disabled(reset_disabled)
+            .when(!reset_disabled, |button| button.cursor_pointer())
             .on_click(cx.listener(move |this, _, window, cx| {
                 if let Some(target) = reset_target {
                     this.update_effect(|effect| *effect = target, window, cx);
@@ -1579,6 +1604,7 @@ impl SettingsView {
         let preset_buttons = ASPECT_PRESETS.iter().enumerate().map(|(index, preset)| {
             let preset_value = (*preset).to_owned();
             Button::new(format!("ratio-preset-{index}"))
+                .cursor_pointer()
                 .label(*preset)
                 .ghost()
                 .on_click(cx.listener(move |this, _, window, cx| {
