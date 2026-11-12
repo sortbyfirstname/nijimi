@@ -22,23 +22,27 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
-Add-Type -Namespace Nijimi -Name Win32 -MemberDefinition @'
+if (-not ('Nijimi.PerfNative' -as [type])) {
+Add-Type -Namespace Nijimi -Name PerfNative -MemberDefinition @'
 [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
 [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr hwnd, out uint pid);
 [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern IntPtr FindWindow(string cls, IntPtr title);
 [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr hwnd);
+[DllImport("kernel32.dll")] public static extern IntPtr OpenProcess(uint access, bool inherit, int pid);
+[DllImport("kernel32.dll")] public static extern bool QueryProcessCycleTime(IntPtr process, out ulong cycles);
 '@
+}
 
 function Get-ForegroundPid {
     $fgPid = [uint32]0
-    [void][Nijimi.Win32]::GetWindowThreadProcessId([Nijimi.Win32]::GetForegroundWindow(), [ref]$fgPid)
+    [void][Nijimi.PerfNative]::GetWindowThreadProcessId([Nijimi.PerfNative]::GetForegroundWindow(), [ref]$fgPid)
     return [int]$fgPid
 }
 
 function Test-OverlayVisible {
     # Title is an IntPtr so we can pass a real NULL; PowerShell turns $null strings into "".
-    $hwnd = [Nijimi.Win32]::FindWindow('NijimiOverlayWindow', [IntPtr]::Zero)
-    return ($hwnd -ne [IntPtr]::Zero) -and [Nijimi.Win32]::IsWindowVisible($hwnd)
+    $hwnd = [Nijimi.PerfNative]::FindWindow('NijimiOverlayWindow', [IntPtr]::Zero)
+    return ($hwnd -ne [IntPtr]::Zero) -and [Nijimi.PerfNative]::IsWindowVisible($hwnd)
 }
 
 function Get-PrivateWorkingSetMB([int]$processId) {
@@ -68,7 +72,17 @@ $app = Get-Process -Id $appPid
 $cores = (Get-CimInstance Win32_Processor | Measure-Object NumberOfLogicalProcessors -Sum).Sum
 $gpuName = (Get-CimInstance Win32_VideoController | Where-Object { $_.CurrentHorizontalResolution } |
     Select-Object -First 1)
-$cpuName = (Get-CimInstance Win32_Processor | Select-Object -First 1).Name.Trim()
+$cpu = Get-CimInstance Win32_Processor | Select-Object -First 1
+$cpuName = $cpu.Name.Trim()
+# Process CPU time only advances in 15.6 ms scheduler ticks, too coarse for nijimi; cycle counts
+# are exact. They tick at the processor's base clock, which converts them to milliseconds.
+$cyclesPerMs = [double]$cpu.MaxClockSpeed * 1000
+$appHandle = [Nijimi.PerfNative]::OpenProcess(0x1000, $false, $appPid)
+function Get-AppCycles {
+    $cycles = [uint64]0
+    [void][Nijimi.PerfNative]::QueryProcessCycleTime($appHandle, [ref]$cycles)
+    return $cycles
+}
 
 Write-Host "nijimi pid $appPid  ($($trayProcess.ExecutablePath))"
 if ($trayProcess.ExecutablePath -notmatch '\\release\\') {
@@ -84,6 +98,7 @@ Write-Host "`rSampling for $Seconds s. Keep the game in the foreground and play 
 $samples = New-Object System.Collections.Generic.List[object]
 $app.Refresh()
 $lastCpu = $app.TotalProcessorTime
+$lastCycles = Get-AppCycles
 $lastTime = Get-Date
 
 for ($second = 1; $second -le $Seconds; $second++) {
@@ -117,6 +132,9 @@ for ($second = 1; $second -le $Seconds; $second++) {
     $cpuMs = ($app.TotalProcessorTime - $lastCpu).TotalMilliseconds
     $wallMs = ($now - $lastTime).TotalMilliseconds
     $lastCpu = $app.TotalProcessorTime
+    $cycles = Get-AppCycles
+    $cpuCycleMs = ($cycles - $lastCycles) / $cyclesPerMs
+    $lastCycles = $cycles
     $lastTime = $now
 
     $samples.Add([pscustomobject]@{
@@ -125,6 +143,8 @@ for ($second = 1; $second -le $Seconds; $second++) {
         OverlayActive   = $overlay
         AppCpuPctOfCore = [math]::Round($cpuMs / $wallMs * 100, 3)
         AppCpuPctTotal  = [math]::Round($cpuMs / $wallMs * 100 / $cores, 4)
+        AppCpuMsPerSec  = [math]::Round($cpuCycleMs / $wallMs * 1000, 3)
+        AppCpuExactPctTotal = [math]::Round($cpuCycleMs / $wallMs * 100 / $cores, 4)
         AppGpu3DPct     = [math]::Round($app3d, 3)
         AppGpuCopyPct   = [math]::Round($appCopy, 3)
         AppGpuOtherPct  = [math]::Round($appOther, 3)
@@ -154,8 +174,9 @@ Active samples: $($active.Count) of $Seconds s with the overlay visible
 Foreground    : $games
 
 nijimi, while active
-  CPU (% of one core)   : $(Get-Stats ($active | ForEach-Object AppCpuPctOfCore))
-  CPU (% of total)      : $(Get-Stats ($active | ForEach-Object AppCpuPctTotal))
+  CPU (ms per second)   : $(Get-Stats ($active | ForEach-Object AppCpuMsPerSec))
+  CPU (% of total)      : $(Get-Stats ($active | ForEach-Object AppCpuExactPctTotal))
+  CPU (% of total, from 15.6 ms ticks): $(Get-Stats ($active | ForEach-Object AppCpuPctTotal))
   GPU 3D engine (%)     : $(Get-Stats ($active | ForEach-Object AppGpu3DPct))
   GPU copy engine (%)   : $(Get-Stats ($active | ForEach-Object AppGpuCopyPct))
   GPU other engines (%) : $(Get-Stats ($active | ForEach-Object AppGpuOtherPct))
