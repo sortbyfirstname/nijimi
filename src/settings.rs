@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::fs;
 use std::io::{Error, ErrorKind, Result};
 use std::path::{Path, PathBuf};
@@ -379,6 +380,10 @@ pub fn paths_match(left: &Path, right: &Path) -> bool {
         .eq_ignore_ascii_case(&right.as_os_str().to_string_lossy())
 }
 
+pub fn path_key(path: &Path) -> String {
+    path.as_os_str().to_string_lossy().to_ascii_lowercase()
+}
+
 pub fn add_app_choices(
     recent: &[PathBuf],
     running: &[PathBuf],
@@ -393,19 +398,15 @@ pub fn add_app_choices(
     choices.extend(recent.iter().cloned());
     choices.extend(running.iter().cloned());
 
-    let mut unique: Vec<PathBuf> = Vec::new();
-    for path in choices {
-        if paths_match(&path, application_executable)
-            || profiles
-                .iter()
-                .any(|profile| paths_match(&profile.executable, &path))
-            || unique.iter().any(|existing| paths_match(existing, &path))
-        {
-            continue;
-        }
-        unique.push(path);
-    }
-    unique
+    let mut seen: HashSet<String> = profiles
+        .iter()
+        .map(|profile| path_key(&profile.executable))
+        .collect();
+    seen.insert(path_key(application_executable));
+    choices
+        .into_iter()
+        .filter(|path| seen.insert(path_key(path)))
+        .collect()
 }
 
 pub fn sorted_profile_paths(profiles: &[AppProfile]) -> Vec<PathBuf> {

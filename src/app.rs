@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::mem::size_of;
 use std::path::PathBuf;
 use std::process::Command;
@@ -721,16 +722,12 @@ fn order_process_executables(mut processes: Vec<(PathBuf, Option<u64>)>) -> Vec<
         },
     );
 
-    let mut executables: Vec<PathBuf> = Vec::new();
-    for (executable, _) in processes {
-        if !executables
-            .iter()
-            .any(|existing| paths_match(existing, &executable))
-        {
-            executables.push(executable);
-        }
-    }
-    executables
+    let mut seen = HashSet::new();
+    processes
+        .into_iter()
+        .map(|(executable, _)| executable)
+        .filter(|executable| seen.insert(settings::path_key(executable)))
+        .collect()
 }
 
 pub(crate) fn browse_executable_for_settings() -> Option<PathBuf> {
