@@ -35,14 +35,14 @@ use windows::Win32::UI::Shell::{
     Shell_NotifyIconW,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    ASFW_ANY, AllowSetForegroundWindow, AppendMenuW, CreatePopupMenu, CreateWindowExW,
-    DefWindowProcW, DestroyMenu, DestroyWindow, DispatchMessageW, FindWindowExW, FindWindowW,
-    GWLP_USERDATA, GetCursorPos, GetDlgItem, GetForegroundWindow, GetMessageW, GetWindowLongPtrW,
-    GetWindowTextW, GetWindowThreadProcessId, HICON, HMENU, IDC_ARROW, KillTimer, LB_ADDSTRING,
-    LB_GETCURSEL, LB_RESETCONTENT, LB_SETCURSEL, LoadCursorW, MENU_ITEM_FLAGS, MF_STRING, MSG,
-    MessageBoxW, PostMessageW, PostQuitMessage, RegisterClassW, RegisterWindowMessageW, SW_HIDE,
-    SW_SHOW, SendMessageW, SetForegroundWindow, SetTimer, SetWindowLongPtrW, SetWindowTextW,
-    ShowWindow, TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenu, TranslateMessage, WINDOW_EX_STYLE,
+    AllowSetForegroundWindow, AppendMenuW, CreatePopupMenu, CreateWindowExW, DefWindowProcW,
+    DestroyMenu, DestroyWindow, DispatchMessageW, FindWindowExW, FindWindowW, GWLP_USERDATA,
+    GetCursorPos, GetDlgItem, GetForegroundWindow, GetMessageW, GetWindowLongPtrW, GetWindowTextW,
+    GetWindowThreadProcessId, HICON, HMENU, IDC_ARROW, KillTimer, LB_ADDSTRING, LB_GETCURSEL,
+    LB_RESETCONTENT, LB_SETCURSEL, LoadCursorW, MENU_ITEM_FLAGS, MF_STRING, MSG, MessageBoxW,
+    PostMessageW, PostQuitMessage, RegisterClassW, RegisterWindowMessageW, SW_HIDE, SW_SHOW,
+    SendMessageW, SetForegroundWindow, SetTimer, SetWindowLongPtrW, SetWindowTextW, ShowWindow,
+    TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenu, TranslateMessage, WINDOW_EX_STYLE,
     WINDOW_STYLE, WM_APP, WM_CLOSE, WM_COMMAND, WM_CREATE, WM_CTLCOLORBTN, WM_CTLCOLOREDIT,
     WM_CTLCOLORLISTBOX, WM_CTLCOLORSTATIC, WM_DESTROY, WM_DISPLAYCHANGE, WM_DRAWITEM,
     WM_ERASEBKGND, WM_LBUTTONUP, WM_NCCREATE, WM_NCDESTROY, WM_RBUTTONUP, WM_SETFONT, WM_TIMER,
@@ -265,7 +265,7 @@ pub fn run(show_settings: bool) -> Result<()> {
         }
 
         let settings_path = settings::config_path()?;
-        let settings = AppSettings::load(&settings_path)?;
+        let (settings, settings_warning) = AppSettings::load(&settings_path)?;
         let application_executable = std::env::current_exe()?;
         let taskbar_created = RegisterWindowMessageW(w!("TaskbarCreated"));
         if taskbar_created == 0 {
@@ -273,7 +273,7 @@ pub fn run(show_settings: bool) -> Result<()> {
         }
         let mut renderer = Renderer::new()?;
         renderer.set_capturable(settings.show_in_screenshots)?;
-        let mut state = Box::new(AppState {
+        let state = OwnedState(Box::into_raw(Box::new(AppState {
             hwnd: HWND::default(),
             renderer,
             frame_timer: None,
@@ -294,8 +294,8 @@ pub fn run(show_settings: bool) -> Result<()> {
             settings_hwnd: HWND::default(),
             settings_palette: None,
             tray_status: TrayStatus::Ready,
-        });
-        let state_ptr = (&mut *state) as *mut AppState;
+        })));
+        let state_ptr = state.0;
         let hwnd = CreateWindowExW(
             WINDOW_EX_STYLE(0),
             w!("NijimiTrayWindow"),
@@ -310,7 +310,7 @@ pub fn run(show_settings: bool) -> Result<()> {
             instance,
             Some(state_ptr.cast()),
         )?;
-        state.hwnd = hwnd;
+        (*state_ptr).hwnd = hwnd;
 
         let tray = tray_data(hwnd, icon, TrayStatus::Ready);
         if !Shell_NotifyIconW(NIM_ADD, &tray).as_bool() {
@@ -337,10 +337,13 @@ pub fn run(show_settings: bool) -> Result<()> {
             return Err(error);
         }
         let _foreground_hook = WinEventHook(hook);
-        if let Some(error) = update_foreground(&mut state) {
+        if let Some(error) = update_foreground(&mut *state_ptr) {
             show_error(&error);
         }
-        if show_settings && let Some(error) = open_settings(&mut *state) {
+        if let Some(warning) = settings_warning {
+            show_error(&warning);
+        }
+        if show_settings && let Some(error) = open_settings(state_ptr) {
             show_error(&error);
         }
         let mut message = MSG::default();
@@ -365,6 +368,15 @@ pub fn run(show_settings: bool) -> Result<()> {
         let _ = DestroyWindow(hwnd);
     }
     Ok(())
+}
+
+/// Freed only after the window that holds the pointer is destroyed.
+struct OwnedState(*mut AppState);
+
+impl Drop for OwnedState {
+    fn drop(&mut self) {
+        drop(unsafe { Box::from_raw(self.0) });
+    }
 }
 
 struct InstanceMutex(HANDLE);
@@ -463,27 +475,37 @@ unsafe extern "system" fn window_proc(
         return LRESULT(0);
     }
     if message == SETTINGS_RELOADED {
-        let state = unsafe { &mut *state_ptr };
-        match AppSettings::load(&state.settings_path) {
-            Ok(settings) => {
-                if let Err(error) = state.renderer.set_capturable(settings.show_in_screenshots) {
-                    show_error(&format!(
-                        "nijimi could not change whether screenshots show the effect:\n{error}"
-                    ));
+        // Error dialogs run a message loop that re-enters this procedure, so show them only after
+        // the borrow of the state has ended.
+        let mut errors = Vec::new();
+        {
+            let state = unsafe { &mut *state_ptr };
+            match AppSettings::load(&state.settings_path) {
+                Ok((settings, warning)) => {
+                    errors.extend(warning);
+                    if let Err(error) = state.renderer.set_capturable(settings.show_in_screenshots)
+                    {
+                        errors.push(format!(
+                            "nijimi could not change whether screenshots show the effect:\n{error}"
+                        ));
+                    }
+                    let frame_rate_changed = settings.frame_rate != state.settings.frame_rate;
+                    state.settings = settings;
+                    rearm_after_error(state);
+                    if let Some(error) = update_foreground(state) {
+                        errors.push(error);
+                    } else if frame_rate_changed
+                        && state.rendering
+                        && let Err(error) = start_frame_timer(state)
+                    {
+                        errors.push(format!("nijimi could not change the frame rate:\n{error}"));
+                    }
                 }
-                let frame_rate_changed = settings.frame_rate != state.settings.frame_rate;
-                state.settings = settings;
-                rearm_after_error(state);
-                if let Some(error) = update_foreground(state) {
-                    show_error(&error);
-                } else if frame_rate_changed
-                    && state.rendering
-                    && let Err(error) = start_frame_timer(state)
-                {
-                    show_error(&format!("nijimi could not change the frame rate:\n{error}"));
-                }
+                Err(error) => errors.push(format!("nijimi could not reload settings:\n{error}")),
             }
-            Err(error) => show_error(&format!("nijimi could not reload settings:\n{error}")),
+        }
+        for error in errors {
+            show_error(&error);
         }
         return LRESULT(0);
     }
@@ -1011,10 +1033,13 @@ pub(crate) fn find_settings_window() -> Option<HWND> {
 /// Passes this launch's foreground rights on so the running instance can raise Settings.
 fn ask_running_tray_to_open_settings() {
     unsafe {
-        let _ = AllowSetForegroundWindow(ASFW_ANY);
         if let Ok(tray) = FindWindowW(w!("NijimiTrayWindow"), PCWSTR::null())
             && !tray.0.is_null()
         {
+            let mut tray_process = 0;
+            if GetWindowThreadProcessId(tray, Some(&mut tray_process)) != 0 {
+                let _ = AllowSetForegroundWindow(tray_process);
+            }
             let _ = PostMessageW(
                 tray,
                 WM_COMMAND,
@@ -1036,7 +1061,11 @@ unsafe fn open_settings(state_ptr: *mut AppState) -> Option<String> {
         process.arg("--settings").arg("--recent");
         process.args(&state.recent_apps);
         match process.spawn() {
-            Ok(_) => None,
+            Ok(child) => {
+                // The new Settings process needs foreground rights to raise its window.
+                let _ = AllowSetForegroundWindow(child.id());
+                None
+            }
             Err(error) => Some(format!("nijimi could not open Settings:\n{error}")),
         }
     }

@@ -67,7 +67,11 @@ pub fn run(recent_apps: Vec<PathBuf>) -> std::result::Result<(), String> {
     }
     let _settings_mutex = SettingsMutex(mutex);
     let settings_path = settings::config_path().map_err(|error| error.to_string())?;
-    let app_settings = AppSettings::load(&settings_path).map_err(|error| error.to_string())?;
+    let (app_settings, warning) =
+        AppSettings::load(&settings_path).map_err(|error| error.to_string())?;
+    if let Some(warning) = warning {
+        app::show_error(&warning);
+    }
     let application_executable = std::env::current_exe().map_err(|error| error.to_string())?;
     let initial_data = InitialData {
         logo: render_logo()?,
@@ -1487,9 +1491,7 @@ impl Render for SettingsView {
                     .flex()
                     .flex_1()
                     .min_h_0()
-                    .children(
-                        (self.page != SettingsPage::Global).then(|| self.render_sidebar(cx)),
-                    )
+                    .children((self.page != SettingsPage::Global).then(|| self.render_sidebar(cx)))
                     .child(
                         div()
                             .flex()

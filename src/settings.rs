@@ -195,73 +195,74 @@ impl AspectRatio {
 }
 
 impl AppSettings {
-    pub fn load(path: &Path) -> Result<Self> {
+    /// Skips unreadable lines, copying the file aside first because the next save would drop them.
+    pub fn load(path: &Path) -> Result<(Self, Option<String>)> {
         let contents = match fs::read_to_string(path) {
             Ok(contents) => contents,
-            Err(error) if error.kind() == ErrorKind::NotFound => return Ok(Self::default()),
+            Err(error) if error.kind() == ErrorKind::NotFound => {
+                return Ok((Self::default(), None));
+            }
             Err(error) => return Err(error),
         };
 
-        Self::parse(&contents)
+        let (settings, bad_lines) = Self::parse(&contents);
+        if bad_lines.is_empty() {
+            return Ok((settings, None));
+        }
+        let lines = bad_lines
+            .iter()
+            .map(|line_number| (line_number + 1).to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let backup = backup_path(path);
+        let backup_note = match fs::copy(path, &backup) {
+            Ok(_) => format!("The original file was copied to:\n{}", backup.display()),
+            Err(error) => format!("nijimi could not copy the original file aside:\n{error}"),
+        };
+        let warning = format!(
+            "nijimi skipped unreadable lines ({lines}) in its settings file:\n{}\n\n{backup_note}",
+            path.display()
+        );
+        Ok((settings, Some(warning)))
     }
 
-    fn parse(contents: &str) -> Result<Self> {
+    fn parse(contents: &str) -> (Self, Vec<usize>) {
         let mut settings = Self::default();
+        let mut bad_lines = Vec::new();
         for (line_number, line) in contents.lines().enumerate() {
-            if line.trim().is_empty() {
-                continue;
+            if !line.trim().is_empty() && settings.parse_line(line).is_none() {
+                bad_lines.push(line_number);
             }
-            let Some((ratio, executable)) = line.split_once('|') else {
-                return Err(invalid_line(line_number));
-            };
-            if ratio == "@global" {
-                settings.default_aspect_ratio =
-                    AspectRatio::parse(executable).ok_or_else(|| invalid_line(line_number))?;
-                continue;
-            }
-            if ratio == "@effect" {
-                settings.default_effect =
-                    EffectSettings::parse(executable).ok_or_else(|| invalid_line(line_number))?;
-                continue;
-            }
-            if ratio == "@frame_rate" {
-                settings.frame_rate = FrameRate::from_key(executable.trim())
-                    .ok_or_else(|| invalid_line(line_number))?;
-                continue;
-            }
-            let flag = match ratio {
-                "@always_on" => Some(&mut settings.always_on),
-                "@show_in_screenshots" => Some(&mut settings.show_in_screenshots),
-                _ => None,
-            };
-            if let Some(flag) = flag {
-                *flag = match executable.trim() {
-                    "1" => true,
-                    "0" => false,
-                    _ => return Err(invalid_line(line_number)),
-                };
-                continue;
-            }
-            let (ratio, effect) = match ratio.split_once(',') {
-                Some((ratio, effect)) => (
-                    ratio,
-                    Some(EffectSettings::parse(effect).ok_or_else(|| invalid_line(line_number))?),
-                ),
-                None => (ratio, None),
-            };
-            let aspect_ratio =
-                AspectRatio::parse(ratio).ok_or_else(|| invalid_line(line_number))?;
-            let executable = executable.trim();
-            if executable.is_empty() {
-                return Err(invalid_line(line_number));
-            }
-            settings.upsert(AppProfile {
-                executable: PathBuf::from(executable),
-                aspect_ratio,
-                effect,
-            });
         }
-        Ok(settings)
+        (settings, bad_lines)
+    }
+
+    fn parse_line(&mut self, line: &str) -> Option<()> {
+        let (ratio, executable) = line.split_once('|')?;
+        match ratio {
+            "@global" => self.default_aspect_ratio = AspectRatio::parse(executable)?,
+            "@effect" => self.default_effect = EffectSettings::parse(executable)?,
+            "@frame_rate" => self.frame_rate = FrameRate::from_key(executable.trim())?,
+            "@always_on" => self.always_on = parse_flag(executable)?,
+            "@show_in_screenshots" => self.show_in_screenshots = parse_flag(executable)?,
+            _ => {
+                let (ratio, effect) = match ratio.split_once(',') {
+                    Some((ratio, effect)) => (ratio, Some(EffectSettings::parse(effect)?)),
+                    None => (ratio, None),
+                };
+                let aspect_ratio = AspectRatio::parse(ratio)?;
+                let executable = executable.trim();
+                if executable.is_empty() {
+                    return None;
+                }
+                self.upsert(AppProfile {
+                    executable: PathBuf::from(executable),
+                    aspect_ratio,
+                    effect,
+                });
+            }
+        }
+        Some(())
     }
 
     pub fn save(&self, path: &Path) -> Result<()> {
@@ -488,11 +489,18 @@ fn is_dir_writable(dir: &Path) -> bool {
     }
 }
 
-fn invalid_line(line_number: usize) -> Error {
-    Error::new(
-        ErrorKind::InvalidData,
-        format!("invalid nijimi settings line {}", line_number + 1),
-    )
+fn parse_flag(value: &str) -> Option<bool> {
+    match value.trim() {
+        "1" => Some(true),
+        "0" => Some(false),
+        _ => None,
+    }
+}
+
+fn backup_path(path: &Path) -> PathBuf {
+    let mut backup = path.as_os_str().to_owned();
+    backup.push(".bad");
+    PathBuf::from(backup)
 }
 
 #[cfg(test)]
@@ -500,6 +508,13 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use super::*;
+
+    fn parse_all(contents: &str) -> std::result::Result<AppSettings, Vec<usize>> {
+        match AppSettings::parse(contents) {
+            (settings, bad_lines) if bad_lines.is_empty() => Ok(settings),
+            (_, bad_lines) => Err(bad_lines),
+        }
+    }
 
     #[test]
     fn parses_and_bounds_aspect_ratios() {
@@ -595,10 +610,10 @@ mod tests {
         let source_path = directory.join("previous.ini");
         fs::write(&source_path, "16:9|G:\\Games\\Example.exe\n").unwrap();
 
-        let missing_config = AppSettings::load(&path).unwrap();
+        let missing_config = AppSettings::load(&path).unwrap().0;
         assert!(missing_config.profiles.is_empty());
         fs::copy(&source_path, &path).unwrap();
-        let loaded = AppSettings::load(&path).unwrap();
+        let loaded = AppSettings::load(&path).unwrap().0;
 
         assert_eq!(
             loaded.ratio_for(Path::new(r"G:\Games\Example.exe")),
@@ -609,7 +624,7 @@ mod tests {
     }
 
     #[test]
-    fn malformed_or_unreadable_settings_are_reported() {
+    fn malformed_lines_are_skipped_and_unreadable_settings_are_reported() {
         let unique = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
@@ -618,11 +633,29 @@ mod tests {
             std::env::temp_dir().join(format!("nijimi-invalid-{}-{unique}", std::process::id()));
         fs::create_dir(&directory).unwrap();
         let path = directory.join(CONFIG_FILE_NAME);
-        fs::write(&path, "not-a-profile\n").unwrap();
+        let contents =
+            "@global|32:9\nnot-a-profile\n@always_on|maybe\n16:9|G:\\Games\\Example.exe\n";
+        fs::write(&path, contents).unwrap();
+
+        let (loaded, warning) = AppSettings::load(&path).unwrap();
         assert_eq!(
-            AppSettings::load(&path).unwrap_err().kind(),
-            ErrorKind::InvalidData
+            loaded.default_aspect_ratio,
+            AspectRatio::new(32, 9).unwrap()
         );
+        assert!(!loaded.always_on);
+        assert_eq!(
+            loaded.ratio_for(Path::new(r"G:\Games\Example.exe")),
+            AspectRatio::new(16, 9)
+        );
+        assert!(warning.unwrap().contains("(2, 3)"));
+        let backup = directory.join(format!("{CONFIG_FILE_NAME}.bad"));
+        assert_eq!(fs::read_to_string(&backup).unwrap(), contents);
+        fs::remove_file(&backup).unwrap();
+        fs::remove_file(&path).unwrap();
+
+        fs::write(&path, "16:9|G:\\Games\\Example.exe\n").unwrap();
+        assert!(AppSettings::load(&path).unwrap().1.is_none());
+        assert!(!backup.exists());
         fs::remove_file(&path).unwrap();
 
         fs::create_dir(&path).unwrap();
@@ -658,7 +691,7 @@ mod tests {
         });
 
         settings.save(&path).unwrap();
-        let mut loaded = AppSettings::load(&path).unwrap();
+        let mut loaded = AppSettings::load(&path).unwrap().0;
         assert_eq!(loaded.profiles.len(), 1);
         assert_eq!(
             loaded.default_aspect_ratio,
@@ -674,31 +707,13 @@ mod tests {
             effect: None,
         });
         loaded.save(&path).unwrap();
-        loaded = AppSettings::load(&path).unwrap();
+        loaded = AppSettings::load(&path).unwrap().0;
         assert_eq!(
             loaded.ratio_for(Path::new(r"C:\Games\Example.exe")),
             AspectRatio::new(32, 9)
         );
         assert!(loaded.remove(Path::new(r"c:\games\example.exe")));
         assert_eq!(loaded.profiles.len(), 0);
-        fs::remove_file(path).unwrap();
-    }
-
-    #[test]
-    fn malformed_settings_are_reported_instead_of_silently_discarded() {
-        let unique = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let path = std::env::temp_dir().join(format!(
-            "nijimi-settings-invalid-{}-{unique}.ini",
-            std::process::id()
-        ));
-        fs::write(&path, "not-a-profile\n").unwrap();
-        assert_eq!(
-            AppSettings::load(&path).unwrap_err().kind(),
-            ErrorKind::InvalidData
-        );
         fs::remove_file(path).unwrap();
     }
 
@@ -713,7 +728,7 @@ mod tests {
             std::process::id()
         ));
         fs::write(&path, "16:9|G:\\Games\\Example.exe\n").unwrap();
-        let loaded = AppSettings::load(&path).unwrap();
+        let loaded = AppSettings::load(&path).unwrap().0;
         assert_eq!(
             loaded.default_aspect_ratio,
             AspectRatio::new(21, 9).unwrap()
@@ -870,16 +885,16 @@ mod tests {
 
     #[test]
     fn flags_round_trip_and_default_to_off() {
-        let defaults = AppSettings::parse("@global|21:9\n").unwrap();
+        let defaults = parse_all("@global|21:9\n").unwrap();
         assert!(!defaults.always_on);
         assert!(!defaults.show_in_screenshots);
-        let always_on = AppSettings::parse("@always_on|1\n").unwrap();
+        let always_on = parse_all("@always_on|1\n").unwrap();
         assert!(always_on.always_on && !always_on.show_in_screenshots);
-        let capturable = AppSettings::parse("@show_in_screenshots|1\n").unwrap();
+        let capturable = parse_all("@show_in_screenshots|1\n").unwrap();
         assert!(capturable.show_in_screenshots && !capturable.always_on);
-        assert!(!AppSettings::parse("@always_on|0\n").unwrap().always_on);
-        assert!(AppSettings::parse("@always_on|yes\n").is_err());
-        assert!(AppSettings::parse("@show_in_screenshots|\n").is_err());
+        assert!(!parse_all("@always_on|0\n").unwrap().always_on);
+        assert!(parse_all("@always_on|yes\n").is_err());
+        assert!(parse_all("@show_in_screenshots|\n").is_err());
 
         let unique = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -896,7 +911,7 @@ mod tests {
                 ..AppSettings::default()
             };
             settings.save(&path).unwrap();
-            assert_eq!(AppSettings::load(&path).unwrap(), settings);
+            assert_eq!(AppSettings::load(&path).unwrap().0, settings);
         }
 
         AppSettings::default().save(&path).unwrap();
@@ -946,7 +961,7 @@ mod tests {
              16:9,softness=20,blend=40,blur=70,resolution=eighth|C:\\Games\\Custom.exe\n\
              4:3|C:\\Games\\Global.exe\n"
         );
-        let loaded = AppSettings::load(&path).unwrap();
+        let loaded = AppSettings::load(&path).unwrap().0;
         fs::remove_file(path).unwrap();
         assert_eq!(loaded, settings);
 
@@ -962,7 +977,7 @@ mod tests {
 
     #[test]
     fn full_resolution_round_trips() {
-        let loaded = AppSettings::parse("@effect|resolution=full\n").unwrap();
+        let loaded = parse_all("@effect|resolution=full\n").unwrap();
         assert_eq!(loaded.default_effect.resolution, BlurResolution::Full);
         assert_eq!(BlurResolution::Full.scale(), 1);
         assert_eq!(
@@ -979,9 +994,9 @@ mod tests {
             ("@frame_rate|60\n", FrameRate::Sixty),
             ("@frame_rate|match\n", FrameRate::Sixty),
         ] {
-            assert_eq!(AppSettings::parse(line).unwrap().frame_rate, rate);
+            assert_eq!(parse_all(line).unwrap().frame_rate, rate);
         }
-        assert!(AppSettings::parse("@frame_rate|144\n").is_err());
+        assert!(parse_all("@frame_rate|144\n").is_err());
         assert_eq!(FrameRate::Thirty.fps(), 30);
         assert_eq!(FrameRate::Sixty.fps(), 60);
 
@@ -1002,13 +1017,13 @@ mod tests {
             fs::read_to_string(&path).unwrap(),
             "@global|21:9\n@frame_rate|60\n"
         );
-        assert_eq!(AppSettings::load(&path).unwrap(), settings);
+        assert_eq!(AppSettings::load(&path).unwrap().0, settings);
         fs::remove_file(path).unwrap();
     }
 
     #[test]
     fn partial_effect_lines_keep_defaults_and_invalid_values_are_rejected() {
-        let loaded = AppSettings::parse("@effect|softness=30\n").unwrap();
+        let loaded = parse_all("@effect|softness=30\n").unwrap();
         assert_eq!(
             loaded.default_effect,
             EffectSettings {
@@ -1016,10 +1031,10 @@ mod tests {
                 ..EffectSettings::default()
             }
         );
-        assert!(AppSettings::parse("@effect|blend=101\n").is_err());
-        assert!(AppSettings::parse("@effect|softness=101\n").is_err());
-        assert!(AppSettings::parse("@effect|resolution=double\n").is_err());
-        assert!(AppSettings::parse("@effect|glow=3\n").is_err());
-        assert!(AppSettings::parse("16:9,blur=x|C:\\Game.exe\n").is_err());
+        assert!(parse_all("@effect|blend=101\n").is_err());
+        assert!(parse_all("@effect|softness=101\n").is_err());
+        assert!(parse_all("@effect|resolution=double\n").is_err());
+        assert!(parse_all("@effect|glow=3\n").is_err());
+        assert!(parse_all("16:9,blur=x|C:\\Game.exe\n").is_err());
     }
 }
