@@ -1293,7 +1293,9 @@ unsafe extern "system" fn overlay_window_proc(
     unsafe { DefWindowProcW(hwnd, message, wparam, lparam) }
 }
 
-fn find_primary_output(factory: &IDXGIFactory2) -> Result<(IDXGIAdapter1, IDXGIOutput1)> {
+pub(crate) fn find_primary_output(
+    factory: &IDXGIFactory2,
+) -> Result<(IDXGIAdapter1, IDXGIOutput1)> {
     unsafe {
         let primary = MonitorFromPoint(
             windows::Win32::Foundation::POINT { x: 0, y: 0 },

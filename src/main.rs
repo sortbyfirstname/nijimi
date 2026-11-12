@@ -22,6 +22,9 @@ mod settings_ui;
 mod startup;
 
 #[cfg(windows)]
+mod system_info;
+
+#[cfg(windows)]
 fn main() {
     let mut args = std::env::args_os().skip(1);
     let first = args.next();

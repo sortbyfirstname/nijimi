@@ -5,8 +5,8 @@ use std::path::Path;
 
 use windows::Win32::Foundation::{ERROR_FILE_NOT_FOUND, WIN32_ERROR};
 use windows::Win32::System::Registry::{
-    HKEY_CURRENT_USER, REG_SZ, RRF_RT_REG_BINARY, RRF_RT_REG_SZ, RegDeleteKeyValueW, RegGetValueW,
-    RegSetKeyValueW,
+    HKEY, HKEY_CURRENT_USER, REG_SZ, RRF_RT_REG_BINARY, RRF_RT_REG_SZ, RegDeleteKeyValueW,
+    RegGetValueW, RegSetKeyValueW,
 };
 use windows::core::{PCWSTR, w};
 
@@ -25,7 +25,7 @@ pub fn is_enabled() -> bool {
     let Ok(executable) = std::env::current_exe() else {
         return false;
     };
-    let Some(command) = read_string(RUN_KEY, VALUE_NAME) else {
+    let Some(command) = read_string(HKEY_CURRENT_USER, RUN_KEY, VALUE_NAME) else {
         return false;
     };
     command_matches(&command, &executable) && !disabled_in_windows_settings()
@@ -58,7 +58,9 @@ pub fn set_enabled(enabled: bool) -> Result<()> {
 /// didn't pass [`BACKGROUND_ARGUMENT`].
 pub fn refresh() -> Result<()> {
     let executable = std::env::current_exe()?;
-    if is_enabled() && read_string(RUN_KEY, VALUE_NAME) != Some(command_for(&executable)) {
+    if is_enabled()
+        && read_string(HKEY_CURRENT_USER, RUN_KEY, VALUE_NAME) != Some(command_for(&executable))
+    {
         set_enabled(true)?;
     }
     Ok(())
@@ -98,23 +100,15 @@ fn disabled_in_windows_settings() -> bool {
     status.is_ok() && size > 0 && data[0] == 0x03
 }
 
-fn read_string(key: PCWSTR, value: PCWSTR) -> Option<String> {
+pub(crate) fn read_string(root: HKEY, key: PCWSTR, value: PCWSTR) -> Option<String> {
     let mut size = 0u32;
     unsafe {
-        RegGetValueW(
-            HKEY_CURRENT_USER,
-            key,
-            value,
-            RRF_RT_REG_SZ,
-            None,
-            None,
-            Some(&mut size),
-        )
-        .ok()
-        .ok()?;
+        RegGetValueW(root, key, value, RRF_RT_REG_SZ, None, None, Some(&mut size))
+            .ok()
+            .ok()?;
         let mut buffer = vec![0u16; (size as usize).div_ceil(2)];
         RegGetValueW(
-            HKEY_CURRENT_USER,
+            root,
             key,
             value,
             RRF_RT_REG_SZ,

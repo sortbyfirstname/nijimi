@@ -13,8 +13,8 @@ use gpui_kit::component::{
     theme::{Theme, ThemeMode},
 };
 use gpui_kit::{
-    Animation, AnimationExt as _, App, AppContext as _, Bounds, Context, Entity, IntoElement,
-    ObjectFit, ParentElement as _, Render, RenderImage, Styled as _, StyledImage as _,
+    Animation, AnimationExt as _, App, AppContext as _, Bounds, ClipboardItem, Context, Entity,
+    IntoElement, ObjectFit, ParentElement as _, Render, RenderImage, Styled as _, StyledImage as _,
     Subscription, SvgRenderer, Transformation, Window, WindowBounds, WindowOptions, div, img, px,
     radians, rgb, size, svg,
 };
@@ -28,7 +28,7 @@ use crate::render::{Preview, PreviewImage, primary_screen_size};
 use crate::settings::{
     self, AppProfile, AppSettings, BlurResolution, EffectSettings, FrameRate, paths_match,
 };
-use crate::{app, app_icon, startup};
+use crate::{app, app_icon, startup, system_info};
 
 pub const WINDOW_TITLE: &str = "nijimi";
 /// `WINDOW_TITLE` as a NUL-terminated UTF-16 string, for Win32 calls.
@@ -123,6 +123,7 @@ enum SettingsPage {
     Program,
     Global,
     Add,
+    About,
 }
 
 fn updated_settings(
@@ -145,7 +146,7 @@ fn updated_settings(
                     .and_then(|profile| profile.effect),
             });
         }
-        SettingsPage::Add => return None,
+        SettingsPage::Add | SettingsPage::About => return None,
     }
     (updated != *settings).then_some(updated)
 }
@@ -184,7 +185,7 @@ fn with_effect_change(
                 .effect
                 .as_mut()?
         }
-        SettingsPage::Add => return None,
+        SettingsPage::Add | SettingsPage::About => return None,
     };
     change(effect);
     (updated != *settings).then_some(updated)
@@ -265,6 +266,8 @@ struct SettingsView {
     search_query: String,
     suppress_ratio_events: bool,
     start_with_windows: bool,
+    system_info: Option<String>,
+    copied_system_info: bool,
     error: Option<String>,
     _subscriptions: Vec<Subscription>,
 }
@@ -352,6 +355,8 @@ impl SettingsView {
             search_query: String::new(),
             suppress_ratio_events: false,
             start_with_windows: startup::is_enabled(),
+            system_info: None,
+            copied_system_info: false,
             error: None,
             _subscriptions: [search_subscription, ratio_subscription]
                 .into_iter()
@@ -375,7 +380,7 @@ impl SettingsView {
                 .selected_profile
                 .as_deref()
                 .and_then(|path| self.settings.ratio_for(path)),
-            SettingsPage::Add => None,
+            SettingsPage::Add | SettingsPage::About => None,
         }
     }
 
@@ -485,7 +490,7 @@ impl SettingsView {
                 .as_deref()
                 .and_then(|path| self.settings.profile_for(path))
                 .is_some_and(|profile| profile.effect.is_some()),
-            SettingsPage::Add => false,
+            SettingsPage::Add | SettingsPage::About => false,
         }
     }
 
@@ -497,7 +502,7 @@ impl SettingsView {
             SettingsPage::Program => self
                 .effect_editable()
                 .then_some(self.settings.default_effect),
-            SettingsPage::Add => None,
+            SettingsPage::Add | SettingsPage::About => None,
         }
     }
 
@@ -599,6 +604,10 @@ impl SettingsView {
 
     fn set_page(&mut self, page: SettingsPage, window: &mut Window, cx: &mut Context<Self>) {
         self.page = page;
+        if page == SettingsPage::About {
+            self.system_info = Some(system_info::summary(&self.settings, &self.settings_path));
+            self.copied_system_info = false;
+        }
         self.error = None;
         self.sync_ratio_text(window, cx);
         cx.notify();
@@ -786,6 +795,15 @@ impl SettingsView {
         .on_click(cx.listener(|this, _, window, cx| {
             this.set_page(SettingsPage::Global, window, cx);
         }));
+        let about = Button::new("about").label("About").small();
+        let about = if self.page == SettingsPage::About {
+            about.primary()
+        } else {
+            about.ghost()
+        }
+        .on_click(cx.listener(|this, _, window, cx| {
+            this.set_page(SettingsPage::About, window, cx);
+        }));
 
         div()
             .flex()
@@ -823,7 +841,9 @@ impl SettingsView {
                     .px_7()
                     .py_3()
                     .child(program_style)
-                    .child(global_style),
+                    .child(global_style)
+                    .child(div().flex_1())
+                    .child(about),
             )
             .child(div().h(px(1.)).bg(rgb(0x383838)))
     }
@@ -831,7 +851,9 @@ impl SettingsView {
     fn render_sidebar(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let paths = match self.page {
             SettingsPage::Add => self.filtered_candidates(),
-            SettingsPage::Program | SettingsPage::Global => self.filtered_profiles(),
+            SettingsPage::Program | SettingsPage::Global | SettingsPage::About => {
+                self.filtered_profiles()
+            }
         };
         self.load_icons(&paths, cx);
         let mut rows = Vec::new();
@@ -1222,6 +1244,129 @@ impl SettingsView {
         cx.notify();
     }
 
+    fn render_about_details(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        const REPOSITORY: &str = env!("CARGO_PKG_REPOSITORY");
+        let card = || {
+            div()
+                .flex()
+                .flex_col()
+                .gap_4()
+                .p_5()
+                .rounded_lg()
+                .bg(rgb(0x252525))
+                .border_1()
+                .border_color(rgb(0x383838))
+        };
+        let link = |id: &'static str, label: &'static str, url: String| {
+            Button::new(id)
+                .label(label)
+                .ghost()
+                .small()
+                .on_click(move |_, _, cx| cx.open_url(&url))
+        };
+        let system_info = self.system_info.clone().unwrap_or_default();
+        div()
+            .flex()
+            .flex_col()
+            .flex_1()
+            .flex_shrink_0()
+            .gap_6()
+            .p_8()
+            .child(div().text_xl().text_color(rgb(0xf0f0f0)).child("About"))
+            .child(
+                card()
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_3()
+                            .child(img(self.logo.clone()).size(px(40.)))
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_col()
+                                    .child(div().text_lg().text_color(rgb(0xf0f0f0)).child("nijimi"))
+                                    .child(
+                                        div()
+                                            .text_sm()
+                                            .text_color(rgb(0xa6a6a6))
+                                            .child(format!("Version {}", env!("CARGO_PKG_VERSION"))),
+                                    ),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap_1()
+                            .text_sm()
+                            .child(
+                                div()
+                                    .text_color(rgb(0xe5e5e5))
+                                    .child("滲み: colour that bleeds beyond its edges."),
+                            )
+                            .child(
+                                div()
+                                    .text_color(rgb(0xa6a6a6))
+                                    .child("Made by Aaron Seabrook. Released under the MIT License."),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .gap_2()
+                            .child(link("github", "View on GitHub", REPOSITORY.to_string()))
+                            .child(link(
+                                "report-issue",
+                                "Report an issue",
+                                format!("{REPOSITORY}/issues/new"),
+                            )),
+                    ),
+            )
+            .child(
+                card()
+                    .child(
+                        setting_row(
+                            "System info",
+                            "Include this when reporting an issue. It doesn't name any apps or file paths.",
+                        )
+                        .child(
+                            Button::new("copy-system-info")
+                                .label(if self.copied_system_info {
+                                    "Copied"
+                                } else {
+                                    "Copy"
+                                })
+                                .small()
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    cx.write_to_clipboard(ClipboardItem::new_string(
+                                        system_info.clone(),
+                                    ));
+                                    this.copied_system_info = true;
+                                    cx.notify();
+                                })),
+                        ),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap_1()
+                            .p_3()
+                            .rounded_md()
+                            .bg(rgb(0x1c1c1c))
+                            .text_xs()
+                            .text_color(rgb(0xc8c8c8))
+                            .children(
+                                self.system_info
+                                    .iter()
+                                    .flat_map(|info| info.lines())
+                                    .map(|line| div().child(line.to_string())),
+                            ),
+                    ),
+            )
+    }
+
     fn render_add_details(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let selected = self.selected_candidate.as_deref();
         let selected_name = selected
@@ -1507,6 +1652,7 @@ impl Render for SettingsView {
             SettingsPage::Program => details_pane().child(self.render_profile_details(cx)),
             SettingsPage::Global => details_pane().child(self.render_global_details(cx)),
             SettingsPage::Add => details_pane().child(self.render_add_details(cx)),
+            SettingsPage::About => details_pane().child(self.render_about_details(cx)),
         };
         div()
             .flex()
@@ -1520,7 +1666,10 @@ impl Render for SettingsView {
                     .flex()
                     .flex_1()
                     .min_h_0()
-                    .children((self.page != SettingsPage::Global).then(|| self.render_sidebar(cx)))
+                    .children(
+                        matches!(self.page, SettingsPage::Program | SettingsPage::Add)
+                            .then(|| self.render_sidebar(cx)),
+                    )
                     .child(
                         div()
                             .flex()

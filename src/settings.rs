@@ -133,7 +133,7 @@ impl EffectSettings {
         Some(effect)
     }
 
-    fn serialize(&self) -> String {
+    pub(crate) fn serialize(&self) -> String {
         let mut value = format!(
             "softness={},blend={},blur={},resolution={}",
             self.edge_softness,

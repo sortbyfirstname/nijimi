@@ -31,12 +31,13 @@ It's also built to cost your games next to nothing. The whole effect runs on the
 ## Features
 
 - **Per-game profiles.** Give each game its own aspect ratio (`16:9`, `21:9`, `32:9`, `16:10`, `4:3`, or any custom `width:height`).
-- **Tunable look.** Set edge softness (soften the picture's outermost few pixels), edge blend (blur the picture gradually into the bars instead of a hard line), blur strength, and blur resolution (full down to an eighth) globally, and override them for any game. A live preview in Settings shows the result on a sample image, sized to your monitor.
+- **Tunable look.** Set edge softness (soften the picture's outermost few pixels), edge blend (blur the picture gradually into the bars instead of a hard line), blur strength, blur resolution (full down to an eighth), and brightness globally, and override them for any game. A live preview in Settings shows the result on a sample image, sized to your monitor.
 - **Frame rate.** Update the effect 30 times a second (default) or 60 for smoother motion.
 - **Automatic.** Turns on when a configured game is the foreground app on your primary display, and pauses on Alt-Tab.
 - **Lightweight.** Capture, blur, and compositing all stay on the GPU, and frames are never copied back to the CPU. Nothing renders while you're not playing, and there's no polling: it reacts to Windows events.
 - **Never covers the game.** The centred game area is left untouched; the effect is drawn only outside it.
 - **Click-through.** The overlay never takes focus or intercepts input.
+- **Hides an idle cursor.** Playing with a controller? Leave the mouse pointer in a bar and it disappears after 2 seconds. Move the mouse and it's back.
 - **Portable.** A single executable, with settings saved in an INI file next to it. No installer, no service. Optionally starts with Windows.
 
 ## Lightweight by design
@@ -77,16 +78,19 @@ GPU time to draw one frame of the effect, at 5120×2160 with 16:9 content and th
 
 The percentages are the share of one second of GPU time; capturing the screen and Windows compositing the overlay add a little on top. To measure on your own GPU, run `cargo test --release bench -- --ignored --nocapture --test-threads=1`.
 
-While a game is running, measured over 60 seconds of gameplay in Persona 5 Royal (running at 90 fps) with the effect active and default settings (Quarter, 30 fps):
+While a game is running, measured in Persona 5 Royal with the effect active and default settings (Quarter, 30 fps), with the game itself using 50–70% of the GPU:
 
-| nijimi while active | Average | 95th percentile |
+| nijimi while active | Calm scene | Busy scene (camera moving) |
 |---|---|---|
-| CPU | **0.01%** of total CPU | 0.07% |
-| GPU (3D engine) | **0.66%** | 0.68% |
+| CPU, average | **0.14%** of total CPU | **0.4–0.55%** |
+| CPU, 95th percentile | 0.20% | 0.7–1.0% |
+| GPU (3D engine) | **0.76%** | **0.70–0.75%** |
 | GPU memory | 295 MB | 295 MB |
 | Memory | 18 MB | 18 MB |
 
-For scale, the game itself used 10.1% of the GPU over the same period. After Alt-Tabbing out, nijimi's GPU use drops to 0% immediately, and its GPU memory to 0 MB after a minute. GPU cost scales with display resolution and GPU speed, so expect a proportionally higher percentage on slower cards or a lower one at lower resolutions. To measure on your own system, run `scripts/measure-performance.ps1` while playing.
+The busy-scene ranges cover four separate 60-second runs; the calm scene is one 20-second run. nijimi's GPU cost stays the same either way. Its CPU use follows the game's GPU load: when the game keeps the GPU busy, the graphics driver takes longer to accept each of nijimi's frames, and that waiting counts as CPU time. Bursts of heavy GPU load raise it the most. CPU time is measured from exact processor cycle counts, as Windows' usual figure only moves in 15.6 ms steps.
+
+After Alt-Tabbing out, nijimi's GPU use drops to 0% immediately, and its GPU memory to 0 MB after a minute. GPU cost scales with display resolution and GPU speed, so expect a proportionally higher percentage on slower cards or a lower one at lower resolutions. To measure on your own system, run `scripts/measure-performance.ps1` while playing.
 
 ## Getting started
 
@@ -110,12 +114,14 @@ Nothing else is needed. `nijimi.exe` is fully self-contained and doesn't need th
 ![nijimi's Program settings: the profile list on the left, sorted alphabetically, and the selected game's aspect ratio and look on the right, with a live preview of the effect](assets/screenshots/program-settings-1.png)
 
 - **Program settings.** Lists your game profiles in alphabetical order. Search by executable name or path, select a profile to change its aspect ratio, give it its own look instead of the global one, or remove it. Supported ratios range from `1:4` to `4:1`; invalid entries are rejected and the previous value is restored.
-- **Global settings.** Sets the default aspect ratio for new profiles (initially `21:9`); existing profiles keep their own ratios. The **look** (edge softness, edge blend, blur strength, and blur resolution) set here applies to every profile without its own. **Frame rate** updates the effect 30 (default) or 60 times a second. **Always on** shows the effect whatever app is in front: profiled games still use their own ratio, and everything else uses the default. It's off by default, and while it's on nijimi keeps rendering instead of going idle. **Show in screenshots** lets screenshots and recordings capture the effect; it's off by default, so they normally show plain black bars. **Start with Windows** launches nijimi in the tray when you sign in, without opening Settings. It's off by default and applies to the copy you turn it on from. If you move the executable, turn it off and on again.
+- **Global settings.** Sets the default aspect ratio for new profiles (initially `21:9`); existing profiles keep their own ratios. The **look** (edge softness, edge blend, blur strength, blur resolution, and brightness) set here applies to every profile without its own. Brightness dims the whole effect, from 100% (as bright as the picture) down to 0% (black bars). **Frame rate** updates the effect 30 (default) or 60 times a second. **Always on** shows the effect whatever app is in front: profiled games still use their own ratio, and everything else uses the default. It's off by default, and while it's on nijimi keeps rendering instead of going idle. **Show in screenshots** lets screenshots and recordings capture the effect; it's off by default, so they normally show plain black bars. **Hide idle cursor** hides the mouse pointer once it has rested in a bar for 2 seconds while the effect is on; it's on by default. **Start with Windows** launches nijimi in the tray when you sign in, without opening Settings. It's off by default and applies to the copy you turn it on from. If you move the executable, turn it off and on again.
 - **Add app.** Shows apps that were in the foreground while nijimi was running, followed by currently running processes (newest first). The list refreshes when you open it and with the refresh button. Windows may block access to elevated or protected processes.
 
 Settings are stored in `nijimi.ini` beside the executable. To move your setup, copy the executable and the INI file together. To carry settings over from an older build, copy its INI file next to the new executable and rename it to `nijimi.ini`.
 
 If the executable's folder isn't writable (for example, if you put it in `Program Files`), settings are stored in `%APPDATA%\nijimi\nijimi.ini` instead. A settings file beside the executable always takes priority.
+
+If any lines in the settings file can't be read (after a hand edit, for example), nijimi skips them, tells you which ones, and first saves a copy of the original file as `nijimi.ini.bad`.
 
 Start with Windows uses your per-user startup list (`HKCU\Software\Microsoft\Windows\CurrentVersion\Run`), so it doesn't need admin rights. It also shows up in Task Manager's **Startup apps**, where it can be turned off too.
 
@@ -124,8 +130,9 @@ Start with Windows uses your per-user startup list (`HKCU\Software\Microsoft\Win
 - **Primary display only.** The effect is applied to the primary display only.
 - **Fixed per-game ratio.** The ratio comes from the profile; nijimi doesn't detect a game's actual resolution, or content inside an ordinary window.
 - **Some content can't be captured.** Protected video and some exclusive-fullscreen modes may not be capturable.
-- **No HDR-specific processing.**
-- **Burn-in.** Ambient lighting may reduce the contrast of static bars, but it can't guarantee to prevent or reverse display burn-in.
+- **Latency and variable refresh rate.** Any window drawn over a game, nijimi's overlay included, means Windows has to compose the game with it instead of showing the game's frames directly. That can add up to a frame of latency, and may affect G-Sync or FreeSync on some setups. This comes with drawing over the game at all, so it can't be tuned away. If it matters for a particular game, remove that game's profile.
+- **HDR.** On an HDR desktop the glow is drawn as standard-range (SDR) content, at the brightness set by Windows' **SDR content brightness** slider, so it's never brighter than SDR white. HDR highlights are clipped before the blur, which is hard to see in a soft glow.
+- **Burn-in.** On OLED and other panels that wear with use, black bars leave their pixels unlit while the rest of the screen ages, so over time the bars can end up brighter than the rest (sometimes called reverse burn-in). Lighting the bars may help the panel wear more evenly, but nijimi can't guarantee to prevent or reverse burn-in.
 - **Screenshots.** By default the overlay is excluded from screen capture, so screenshots and recordings don't show it even though it's visible on your monitor. Turn on **Show in screenshots** in Global settings to include it.
 
 ---
@@ -141,12 +148,14 @@ nijimi is written in Rust and runs as two parts of the same executable.
 
 Only one tray instance runs per Windows session. If Windows Explorer restarts, the tray icon is restored.
 
+To hide an idle cursor, nijimi places a 1×1 invisible window of its own under the pointer that shows no cursor. Windows' cursor settings are never changed, so if nijimi closes or crashes the cursor simply reappears. Moving the mouse takes the pointer off that pixel. A click or scroll without moving it first only removes the window, so it doesn't reach the game.
+
 ### Rendering pipeline
 
 1. **Capture.** The desktop is captured with DXGI Desktop Duplication. Frames stay in GPU memory and are never copied to the CPU. The latest frame is kept in a texture, and the overlay is only redrawn when the screen or the settings change, so a static screen or a moving mouse costs no GPU work.
 2. **Sample.** The content near the edges of the protected rectangle is reflected outward and averaged down to the blur resolution (full, half, quarter, or eighth).
 3. **Blur.** A separable Gaussian sized by the blur strength, plus a wider smoothing pass, produces a broad, soft glow, followed by a distance fade away from the content. It's only computed in and around the bars, widened by the blur's reach so the result is identical to blurring the whole screen. At Full resolution the glow still runs at half resolution, where it looks the same at a fraction of the cost; Full sharpens the edge blend. Intermediates are 10-bit and the result half-float, so wide gradients don't band.
-4. **Composite.** The full-resolution result is dithered and clipped to the area *outside* the protected rectangle, then presented through a click-through DirectComposition overlay. With edge softness or edge blend on, the overlay also covers the content's outermost few pixels (at most 1% of the screen's shorter side; video and games often have a fringe there), fully opaque at the very edge and fading into the picture. From the start of that band outwards the blur radius grows smoothly from zero to the glow's, read from a mip chain of the prefiltered texture with B-spline filtering, while the band hands over to the glow across its whole width. The glow is as bright as the picture where it meets it and settles to its own level further out, so neither sharpness nor brightness changes at a visible line. The overlay excludes itself from capture by default, and because it never samples anything it draws over, it never feeds back into its own input even when screenshots are allowed to show it.
+4. **Composite.** The full-resolution result is dithered and clipped to the area *outside* the protected rectangle, then presented through a click-through DirectComposition overlay. With edge softness or edge blend on, the overlay also covers the content's outermost few pixels (at most 1% of the screen's shorter side; video and games often have a fringe there), fully opaque at the very edge and fading into the picture. From the start of that band outwards the blur radius grows smoothly from zero to the glow's, read from a mip chain of the prefiltered texture with B-spline filtering, while the band hands over to the glow across its whole width. The glow is as bright as the picture where it meets it and settles to its own level further out, so neither sharpness nor brightness changes at a visible line. The brightness setting then scales the whole overlay, including the softened strip over the picture's edge, so the picture eases down to the bars' level instead of meeting them at a line. The overlay excludes itself from capture by default, and because it never samples anything it draws over, it never feeds back into its own input even when screenshots are allowed to show it.
 
 The protected rectangle is computed with integer geometry, fitted and centred on the primary display for the selected ratio.
 
@@ -187,6 +196,10 @@ The **Build** GitHub Actions workflow tests every push to `main` and every pull 
 `cargo test` covers aspect-ratio geometry (including portrait and odd-sized displays), settings round trips and activation rules, capture retry behaviour, frame timer accuracy, and offscreen Direct3D WARP rendering of the blur passes, including a check that blurring only around the bars matches blurring the whole screen pixel for pixel.
 
 Two opt-in tests run on your own GPU: `cargo test --release -- --ignored --nocapture --test-threads=1` prints the GPU time per frame across screen sizes, aspect ratios, and blur resolutions, and checks that Full resolution looks the same with its glow at half resolution.
+
+## Tested on
+
+nijimi has been built and tested on one setup: a single 5120×2160 ultrawide monitor with an NVIDIA GPU, on Windows 11. Other setups (multiple monitors, other resolutions, rotated displays, AMD or Intel GPUs, or HDR) may behave differently. If something doesn't look or work right on yours, please [open an issue](../../issues).
 
 ## License
 
