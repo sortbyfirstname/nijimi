@@ -27,10 +27,10 @@ use windows::Win32::Graphics::Dxgi::Common::{
 };
 use windows::Win32::Graphics::Dxgi::{
     CreateDXGIFactory1, DXGI_ERROR_NOT_CURRENTLY_AVAILABLE, DXGI_ERROR_SESSION_DISCONNECTED,
-    DXGI_ERROR_WAIT_TIMEOUT, DXGI_OUTDUPL_FRAME_INFO, DXGI_PRESENT, DXGI_SCALING_STRETCH,
-    DXGI_SWAP_CHAIN_DESC1, DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL, DXGI_USAGE_RENDER_TARGET_OUTPUT,
-    IDXGIAdapter, IDXGIAdapter1, IDXGIDevice, IDXGIFactory2, IDXGIOutput1, IDXGIOutputDuplication,
-    IDXGISwapChain1,
+    DXGI_ERROR_WAIT_TIMEOUT, DXGI_OUTDUPL_FRAME_INFO, DXGI_OUTDUPL_MOVE_RECT, DXGI_PRESENT,
+    DXGI_SCALING_STRETCH, DXGI_SWAP_CHAIN_DESC1, DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL,
+    DXGI_USAGE_RENDER_TARGET_OUTPUT, IDXGIAdapter, IDXGIAdapter1, IDXGIDevice, IDXGIFactory2,
+    IDXGIOutput1, IDXGIOutputDuplication, IDXGISwapChain1,
 };
 use windows::Win32::Graphics::Gdi::{MONITOR_DEFAULTTOPRIMARY, MonitorFromPoint};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
@@ -552,7 +552,8 @@ impl Renderer {
                         | windows::Win32::UI::WindowsAndMessaging::WS_EX_TRANSPARENT.0
                         | windows::Win32::UI::WindowsAndMessaging::WS_EX_NOACTIVATE.0
                         | windows::Win32::UI::WindowsAndMessaging::WS_EX_TOOLWINDOW.0
-                        | windows::Win32::UI::WindowsAndMessaging::WS_EX_LAYERED.0,
+                        | windows::Win32::UI::WindowsAndMessaging::WS_EX_LAYERED.0
+                        | windows::Win32::UI::WindowsAndMessaging::WS_EX_NOREDIRECTIONBITMAP.0,
                 ),
                 WINDOW_CLASS,
                 w!("nijimi ambient overlay"),
@@ -764,6 +765,61 @@ impl Renderer {
     }
 }
 
+/// Whether the frame changed anything inside `area`; the overlay never draws there, so its own
+/// presents don't trigger a redraw.
+unsafe fn frame_touches(
+    duplication: &IDXGIOutputDuplication,
+    frame_info: &DXGI_OUTDUPL_FRAME_INFO,
+    area: ScreenRect,
+) -> bool {
+    let size = frame_info.TotalMetadataBufferSize as usize;
+    if size == 0 {
+        return true;
+    }
+    let overlaps = |rect: &RECT| {
+        rect.left < area.right
+            && rect.right > area.left
+            && rect.top < area.bottom
+            && rect.bottom > area.top
+    };
+    unsafe {
+        let mut moves =
+            vec![DXGI_OUTDUPL_MOVE_RECT::default(); size / size_of::<DXGI_OUTDUPL_MOVE_RECT>() + 1];
+        let mut used = 0;
+        if duplication
+            .GetFrameMoveRects(
+                (moves.len() * size_of::<DXGI_OUTDUPL_MOVE_RECT>()) as u32,
+                moves.as_mut_ptr(),
+                &mut used,
+            )
+            .is_err()
+        {
+            return true;
+        }
+        let moved = used as usize / size_of::<DXGI_OUTDUPL_MOVE_RECT>();
+        if moves[..moved]
+            .iter()
+            .any(|movement| overlaps(&movement.DestinationRect))
+        {
+            return true;
+        }
+        let mut dirty = vec![RECT::default(); size / size_of::<RECT>() + 1];
+        if duplication
+            .GetFrameDirtyRects(
+                (dirty.len() * size_of::<RECT>()) as u32,
+                dirty.as_mut_ptr(),
+                &mut used,
+            )
+            .is_err()
+        {
+            return true;
+        }
+        dirty[..used as usize / size_of::<RECT>()]
+            .iter()
+            .any(overlaps)
+    }
+}
+
 /// E_ACCESSDENIED means a secure desktop (lock screen or UAC prompt) is showing.
 fn is_transient_capture_error(code: HRESULT) -> bool {
     [
@@ -912,8 +968,12 @@ impl Gpu {
             if image_changed {
                 let texture: ID3D11Texture2D = resource.ok_or_else(Error::from_win32)?.cast()?;
                 self.context.CopyResource(&self.captured_texture, &texture);
+                if !self.has_captured_frame
+                    || frame_touches(duplication, &frame_info, scene.clear_rect)
+                {
+                    self.up_to_date = false;
+                }
                 self.has_captured_frame = true;
-                self.up_to_date = false;
             }
             Ok(())
         };
@@ -1294,6 +1354,15 @@ mod tests {
     }
 
     const TEST_BLUR_SCALE: u32 = 4;
+
+    #[test]
+    fn overlay_window_is_created_hidden() {
+        let renderer = Renderer::new().expect("the overlay window should be created");
+        assert!(
+            !unsafe { windows::Win32::UI::WindowsAndMessaging::IsWindowVisible(renderer.hwnd) }
+                .as_bool()
+        );
+    }
 
     thread_local! {
         /// Runs the glow passes over the whole screen instead of just around the bars.
