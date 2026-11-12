@@ -131,7 +131,11 @@ fn gpu_ms(
     let draw = || unsafe {
         draw_ambient(AmbientPass {
             context,
-            render_target: &screen.output,
+            targets: &[CompositeTarget::whole_screen(
+                &screen.output,
+                screen.width,
+                screen.height,
+            )],
             scene_buffer: &scene_buffer,
             scene: &scene,
             blur: &blur,

@@ -173,6 +173,7 @@ impl Preview {
                 &pipeline,
                 FullscreenPass {
                     render_target: &targets.screen.render_target,
+                    origin: [0, 0],
                     width,
                     height,
                     pixel_shader: &self.screen_shader,
@@ -187,7 +188,11 @@ impl Preview {
             );
             draw_ambient(AmbientPass {
                 context,
-                render_target: &targets.overlay.render_target,
+                targets: &[CompositeTarget::whole_screen(
+                    &targets.overlay.render_target,
+                    width,
+                    height,
+                )],
                 scene_buffer: &self.scene_buffer,
                 scene: &scene,
                 blur: &targets.blur,
@@ -200,6 +205,7 @@ impl Preview {
                 &pipeline,
                 FullscreenPass {
                     render_target: &targets.output_target,
+                    origin: [0, 0],
                     width,
                     height,
                     pixel_shader: &self.final_shader,
