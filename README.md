@@ -28,11 +28,11 @@ A small Windows tray app that fills the black bars around a game with a soft, bl
 
 ## Why use it?
 
-- **Kinder to OLED screens.** Black bars leave their pixels unlit while the rest of the panel ages, so over time the bars can end up brighter than everything else (reverse burn-in). Lighting them with the game's own colours helps the whole screen wear more evenly ([caveat](#limitations)).
+- **Kinder to OLED screens.** Black bars leave their pixels unlit while the rest of the panel ages, so over time the bars can end up brighter than everything else (reverse burn-in). Lighting them with the game's own colours helps the whole screen wear more evenly.
 - **Ultrawide, but the game isn't?** Play 16:9 games on a 21:9 or 32:9 monitor, or 4:3 classics on a 16:9 one, without big dead slabs of black either side.
 - **Set it once, then forget it.** Give each game an aspect ratio. nijimi turns on when that game is in front and off when you Alt-Tab away.
-- **Costs your games next to nothing.** Everything runs on the GPU at about 0.07 ms a frame. Idle, it uses no CPU, no GPU and no GPU memory ([numbers](#performance)).
-- **Never touches the game.** No injection, no hooks, no driver. It's a separate click-through overlay that never covers the picture itself.
+- **Costs your games next to nothing.** Under 1% of the GPU while you play, and nothing at all when idle ([numbers](#performance)).
+- **Never touches the game.** No injection, no hooks, no driver. It's a separate click-through overlay that draws in the bars, not over the game.
 - **Portable.** One self-contained `.exe` and an INI file. No installer, no service.
 
 ## Getting started
@@ -45,7 +45,7 @@ A small Windows tray app that fills the black bars around a game with a soft, bl
 
 Closing Settings leaves nijimi in the tray. Click the tray icon to reopen Settings, or right-click it for **Exit**.
 
-**Requirements:** Windows 10 version 2004 or later, and a Direct3D 11 GPU. Nothing else, not even the Visual C++ Redistributable.
+**Requirements:** Windows 10 version 2004 or later, and a Direct3D 11 GPU. No runtimes to install.
 
 ## Settings
 
@@ -60,26 +60,26 @@ Closing Settings leaves nijimi in the tray. Click the tray icon to reopen Settin
 | Edge softness | Softens the picture's outermost few pixels |
 | Edge blend | Blurs the picture gradually into the bars instead of meeting them at a line |
 | Blur strength | How far the glow spreads |
-| Blur resolution | Full, half, quarter (default), or eighth. Lower is cheaper and softer |
+| Blur resolution | Full, half, quarter (default), or eighth - lower is cheaper |
 | Brightness | 100% matches the picture; 0% gives plain black bars |
 
 **Global:**
 
 | Setting | Default | What it does |
 |---|---|---|
-| Default aspect ratio | `21:9` | Used for new profiles, and for every app when Always on is set |
+| Default aspect ratio | `21:9` | Used for new profiles, and for apps without a profile when Always on is set |
 | Frame rate | 30 fps | Update the glow 30 or 60 times a second |
 | Always on | Off | Show the effect whatever app is in front |
 | Show in screenshots | Off | Let screenshots and recordings capture the glow |
 | Hide idle cursor | On | Hide the pointer after it rests in a bar for 2 s (handy with a controller) |
-| Start with Windows | Off | Start in the tray when you sign in. If you move the exe, toggle it off and on again |
+| Start with Windows | Off | Start in the tray when you sign in; if you move the exe, toggle it off and on again |
 
 <details>
 <summary>Where settings are stored</summary>
 
 - In `nijimi.ini` beside the executable. Copy both together to move your setup.
 - If that folder isn't writable (e.g. `Program Files`), settings go to `%APPDATA%\nijimi\nijimi.ini` instead. A file beside the exe always wins.
-- Unreadable lines (after a hand edit, say) are skipped and reported, and the original file is first backed up as `nijimi.ini.bad`.
+- If a hand edit breaks some lines, nijimi backs up the file as `nijimi.ini.bad`, skips those lines and tells you which ones.
 - Start with Windows uses `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`, so it needs no admin rights and shows up in Task Manager's **Startup apps**.
 
 </details>
@@ -87,11 +87,10 @@ Closing Settings leaves nijimi in the tray. Click the tray icon to reopen Settin
 ## Limitations
 
 - **Primary display only.**
-- **Fixed ratio per game.** nijimi doesn't detect a game's real resolution, or content inside an ordinary window.
+- **Fixed ratio per game.** nijimi centres the ratio you set on the screen. It doesn't detect the game's actual resolution or window.
 - **Some content can't be captured,** such as protected video and some exclusive-fullscreen modes.
-- **Latency and VRR.** Any window over a game, this one included, makes Windows compose the game instead of showing it directly. That can add up to a frame of latency and may affect G-Sync/FreeSync on some setups. If it matters for a game, remove that game's profile.
+- **Older GPUs: latency and VRR.** Modern GPUs keep showing the game directly with nijimi on top, using multiplane overlays (MPO). Tested on an RTX 5090, it added no latency. On GPUs or drivers without MPO, Windows has to compose the game with the overlay instead, which can add up to a frame of latency and affect G-Sync/FreeSync. If that matters for a game, remove its profile.
 - **HDR.** The glow is drawn as SDR, at Windows' **SDR content brightness**. HDR highlights are clipped before the blur, which is hard to notice in a soft glow.
-- **Burn-in.** Lighting the bars may help OLED panels wear more evenly, but nijimi can't promise to prevent or reverse burn-in.
 
 ## Performance
 
@@ -107,7 +106,7 @@ Release build on a Ryzen 7 9800X3D and an RTX 5090 at 5120×2160, 165 Hz.
 
 Alt-Tab back within a minute and the overlay returns in about **11 ms**. After that, it takes about **110 ms**, mostly the driver creating a device. Either way the game keeps running normally.
 
-**While playing:** Persona 5 Royal, 60 s, default look (Quarter, 30 fps), Settings closed.
+**While playing:** Persona 5 Royal, 60 s, default settings (Quarter, 30 fps), Settings closed.
 
 | nijimi while active | |
 |---|---|
@@ -150,9 +149,10 @@ nijimi is written in Rust and runs as two processes from the same exe:
 
 - **Idle means idle.** With no game in front there's no capture, rendering or timers. GPU resources are kept for one minute (so a quick Alt-Tab is instant), then fully released.
 - **Shaders are precompiled** by `build.rs`, so the HLSL compiler never loads at runtime.
-- **Pacing** uses a high-resolution waitable timer (`SetTimer` only ticks every 15.6 ms). Ticks with no new desktop frame skip drawing. Above about 60 fps, presenting the overlay made the driver stall, so faster rates aren't offered.
+- **Pacing** uses a high-resolution waitable timer (`SetTimer` only ticks every 15.6 ms). Ticks with no new desktop frame skip drawing. Faster than about 60 fps, presenting the overlay makes the driver stall, so higher rates aren't offered.
 - **Recovery.** Lost capture (a UAC prompt, a mode switch) is retried with backoff up to 4 s, and resources are rebuilt after display changes.
-- **Idle cursor.** A 1×1 invisible window under the pointer hides it. System cursors are never changed, so a crash can't leave the cursor hidden.
+
+**Idle cursor:** a 1×1 invisible window under the pointer hides it. System cursors are never changed, so a crash can't leave the cursor hidden.
 
 ## Development
 
