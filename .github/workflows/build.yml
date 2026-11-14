@@ -80,22 +80,27 @@ jobs:
 
       - name: Package
         if: steps.version.outputs.publish == 'true'
-        id: package
         run: |
-          $name = "nijimi-${{ steps.version.outputs.tag }}-portable-x64"
+          $tag = "${{ steps.version.outputs.tag }}"
           New-Item -ItemType Directory -Path "dist/nijimi" | Out-Null
           Copy-Item target/release/nijimi.exe, LICENSE "dist/nijimi/"
-          Compress-Archive -Path "dist/nijimi" -DestinationPath "dist/$name.zip"
-          $hash = (Get-FileHash "dist/$name.zip" -Algorithm SHA256).Hash.ToLower()
-          "$hash  $name.zip" | Out-File -FilePath "dist/$name.zip.sha256" -Encoding ascii -NoNewline
-          "asset=dist/$name.zip" >> $env:GITHUB_OUTPUT
+          Compress-Archive -Path "dist/nijimi" -DestinationPath "dist/nijimi-$tag-portable-x64.zip"
+
+          $iscc = (Get-Command iscc -ErrorAction SilentlyContinue).Source
+          if (-not $iscc) { $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" }
+          & $iscc "/DAppVersion=${{ steps.version.outputs.version }}" installer/nijimi.iss
+          if ($LASTEXITCODE -ne 0) { throw "Inno Setup failed with exit code $LASTEXITCODE" }
+
+          foreach ($file in Get-ChildItem dist -File) {
+            $hash = (Get-FileHash $file.FullName -Algorithm SHA256).Hash.ToLower()
+            "$hash  $($file.Name)" | Out-File -FilePath "$($file.FullName).sha256" -Encoding ascii -NoNewline
+          }
 
       - name: Publish GitHub release
         if: steps.version.outputs.publish == 'true'
         run: |
           $tag = "${{ steps.version.outputs.tag }}"
-          $asset = "${{ steps.package.outputs.asset }}"
-          gh release create $tag $asset "$asset.sha256" `
+          gh release create $tag (Get-ChildItem dist -File).FullName `
             --target $env:GITHUB_SHA `
             --title "nijimi $tag" `
             --generate-notes

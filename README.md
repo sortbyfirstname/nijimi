@@ -188,7 +188,7 @@ In RustRover, the shared **Run** configuration uses `dev-release` and **Build** 
 
 ### Releasing
 
-The **Build** workflow tests every push and pull request. To release, bump `version` in `Cargo.toml` and push to `main`. The workflow tags `v<version>` and publishes a portable zip (a `nijimi` folder with the exe and license) with its SHA-256 checksum.
+The **Build** workflow tests every push and pull request. To release, bump `version` in `Cargo.toml` and push to `main`. The workflow tags `v<version>` and publishes a per-user installer (built from `installer/nijimi.iss` with Inno Setup) and a portable zip (a `nijimi` folder with the exe and license), each with a SHA-256 checksum.
 
 ## Tested on
 
