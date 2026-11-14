@@ -181,6 +181,8 @@ cargo test                       # geometry, settings, activation, timing, WARP 
 
 In RustRover, the shared **Run** configuration uses `dev-release` and **Build** produces the release exe.
 
+To build the installer and portable zip into `dist\` as a release would, install [Inno Setup](https://jrsoftware.org/isinfo.php) (`winget install JRSoftware.InnoSetup`), then run `powershell -ExecutionPolicy Bypass -File scripts\package.ps1`, or **Package** in RustRover.
+
 ### Measuring performance
 
 - **GPU time per frame:** `cargo test --release bench -- --ignored --nocapture --test-threads=1`

@@ -74,27 +74,9 @@ jobs:
           "tag=$tag" >> $env:GITHUB_OUTPUT
           "publish=$(if ($exists) { 'false' } else { 'true' })" >> $env:GITHUB_OUTPUT
 
-      - name: Build release
+      - name: Build and package
         if: steps.version.outputs.publish == 'true'
-        run: cargo build --release --locked
-
-      - name: Package
-        if: steps.version.outputs.publish == 'true'
-        run: |
-          $tag = "${{ steps.version.outputs.tag }}"
-          New-Item -ItemType Directory -Path "dist/nijimi" | Out-Null
-          Copy-Item target/release/nijimi.exe, LICENSE "dist/nijimi/"
-          Compress-Archive -Path "dist/nijimi" -DestinationPath "dist/nijimi-$tag-portable-x64.zip"
-
-          $iscc = (Get-Command iscc -ErrorAction SilentlyContinue).Source
-          if (-not $iscc) { $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" }
-          & $iscc "/DAppVersion=${{ steps.version.outputs.version }}" installer/nijimi.iss
-          if ($LASTEXITCODE -ne 0) { throw "Inno Setup failed with exit code $LASTEXITCODE" }
-
-          foreach ($file in Get-ChildItem dist -File) {
-            $hash = (Get-FileHash $file.FullName -Algorithm SHA256).Hash.ToLower()
-            "$hash  $($file.Name)" | Out-File -FilePath "$($file.FullName).sha256" -Encoding ascii -NoNewline
-          }
+        run: ./scripts/package.ps1
 
       - name: Publish GitHub release
         if: steps.version.outputs.publish == 'true'
