@@ -26,8 +26,7 @@ fn write_version_header() {
     std::fs::write(out_dir.join("version.rh"), header).expect("failed to write version.rh");
 }
 
-/// Compiles `src/ambient.hlsl` to bytecode at build time so the app never has to load the
-/// HLSL compiler or compile shaders at runtime (which took ~100 ms on every renderer start).
+/// Precompiles `src/ambient.hlsl` so renderer start skips a ~100 ms runtime shader compile.
 #[cfg(windows)]
 mod shaders {
     use std::path::PathBuf;

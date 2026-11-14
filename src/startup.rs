@@ -1,4 +1,4 @@
-//! "Start with Windows" via the per-user `Run` registry key. No installer or admin rights needed.
+//! "Start with Windows" via the per-user `Run` registry key.
 
 use std::io::{Error, Result};
 use std::path::Path;

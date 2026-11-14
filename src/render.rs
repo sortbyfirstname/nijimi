@@ -121,7 +121,6 @@ struct SceneConstants {
     edge_inset: f32,
     glow_downsample: f32,
     bar_brightness: f32,
-    /// 0 or 1.
     overlay_passthrough: f32,
 }
 
@@ -162,7 +161,6 @@ impl BlurScale {
 }
 
 struct SceneGeometry {
-    /// The picture, in screen pixels.
     content: ScreenRect,
     /// The content minus the edge the edge blend covers: sampled, and never drawn over.
     clear_rect: ScreenRect,
@@ -718,7 +716,7 @@ impl Renderer {
         Ok(())
     }
 
-    // Capturing the overlay is safe: the shader only samples the content area, which it leaves clear.
+    /// Safe: the shader only samples the content area, which the overlay leaves clear.
     pub fn set_capturable(&mut self, capturable: bool) -> Result<()> {
         if capturable != self.capturable {
             set_display_affinity(self.hwnd, capturable)?;
@@ -1220,8 +1218,7 @@ unsafe fn draw_ambient(pass: AmbientPass<'_>) -> Result<()> {
             sampler: &shaders.sampler,
             rasterizer: &shaders.rasterizer,
         };
-        // The edge blend reads the prefilter's mips anywhere near the bars, so it covers the
-        // whole screen. It's the cheapest pass.
+        // The edge blend reads these mips anywhere near the bars, so this covers the whole screen.
         draw_fullscreen_pass(
             &pipeline,
             FullscreenPass {
@@ -1984,7 +1981,6 @@ mod tests {
                 let (before, after) = (render(1), render(2));
                 let (mut max, mut sum, mut over2, mut n) = (0u8, 0u64, 0u64, 0u64);
                 for (a, b) in before.chunks(4).zip(after.chunks(4)) {
-                    // Only pixels the overlay draws: its alpha is non-zero.
                     if a[3] == 0 && b[3] == 0 {
                         continue;
                     }

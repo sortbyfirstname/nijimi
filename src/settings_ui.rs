@@ -156,7 +156,6 @@ fn updated_settings(
     (updated != *settings).then_some(updated)
 }
 
-/// The effect shown on `page`: the global one, or the selected profile's (which may follow it).
 fn effect_on_page(
     settings: &AppSettings,
     page: SettingsPage,
@@ -400,7 +399,6 @@ impl SettingsView {
         effect_on_page(&self.settings, self.page, self.selected_profile.as_deref())
     }
 
-    /// What the preview should show: the page's look, with sliders mid-drag taking effect live.
     fn preview_target(&self, cx: &App) -> Option<(ContentArea, EffectSettings)> {
         let content_area = self.current_ratio()?;
         let mut effect = self.current_effect();
@@ -871,8 +869,7 @@ impl SettingsView {
                             .child(
                                 div()
                                     .relative()
-                                    // The wordmark is all lowercase, so its visual centre sits
-                                    // below the line box's centre; nudge it up to align with the mark.
+                                    // Lowercase text sits low in its line box; align it with the mark.
                                     .top(px(-2.))
                                     .text_sm()
                                     .text_color(rgb(0xf0f0f0))
@@ -1767,8 +1764,7 @@ impl SettingsView {
 impl Render for SettingsView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.refresh_preview(cx);
-        // Fill the remaining pane height so `flex_1` / centering inside each page works, and
-        // scroll when a page is taller than the window.
+        // Fills the pane so pages can centre, and scrolls when a page is taller than the window.
         let details_pane = || {
             div()
                 .flex()

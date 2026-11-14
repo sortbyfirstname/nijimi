@@ -272,9 +272,8 @@ float dither(float2 position)
     return frac(52.9829189 * frac(dot(position, float2(0.06711056, 0.00583715)))) - 0.5;
 }
 
-// Reads one mip level with a cubic B-spline instead of bilinear filtering. Bilinear turns the
-// coarse, box-filtered mips into a visible grid of ramps; the B-spline is smooth across texel
-// boundaries. Its 4x4 footprint is gathered with four bilinear taps.
+// Cubic B-spline read of one mip level; bilinear shows coarse mips as a grid of ramps. The 4x4
+// footprint is gathered with four bilinear taps.
 float3 sampleBSpline(float2 uv, uint level)
 {
     uint width, height, levels;
@@ -299,9 +298,7 @@ float3 sampleBSpline(float2 uv, uint level)
                  + g1.x * prefiltered.SampleLevel(linearClamp, float2(uv1.x, uv1.y), level).rgb);
 }
 
-// A blur whose radius, in screen pixels, can change from pixel to pixel. It blends between the
-// two nearest levels of the prefiltered texture's mip chain, and fades in from the sharp picture
-// below the radius of a single prefiltered texel.
+// A blur whose radius in screen pixels varies per pixel, blending the two nearest mips.
 float3 blurAt(float2 uv, float radius)
 {
     // A mip texel read through the B-spline blurs about as much as a Gaussian of 0.65 times its

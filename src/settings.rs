@@ -90,7 +90,7 @@ impl FrameRate {
     }
 }
 
-/// How the ambient fill looks. Strengths are percentages from 0 to 100.
+/// Strengths are percentages from 0 to 100.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct EffectSettings {
     pub edge_softness: u8,
