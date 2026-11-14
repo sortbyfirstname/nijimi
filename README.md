@@ -67,7 +67,7 @@ Closing Settings leaves nijimi in the tray. Click the tray icon to reopen Settin
 
 | Setting | Default | What it does |
 |---|---|---|
-| Default content area | `21:9` | Used for new profiles, and for apps without a profile when Always on is set |
+| Default content area | `16:9` | Used for new profiles, and for apps without a profile when Always on is set |
 | Frame rate | 30 fps | Update the glow 30 or 60 times a second |
 | Always on | Off | Show the effect whatever app is in front |
 | Show in screenshots | Off | Let screenshots and recordings capture the glow |

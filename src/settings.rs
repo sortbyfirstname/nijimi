@@ -187,7 +187,7 @@ pub struct AppSettings {
 impl Default for AppSettings {
     fn default() -> Self {
         Self {
-            default_content_area: ContentArea::ratio(21, 9).unwrap(),
+            default_content_area: ContentArea::ratio(16, 9).unwrap(),
             default_effect: EffectSettings::default(),
             always_on: false,
             show_in_screenshots: false,
@@ -575,10 +575,10 @@ mod tests {
     }
 
     #[test]
-    fn new_settings_default_to_21_9() {
+    fn new_settings_default_to_16_9() {
         assert_eq!(
             AppSettings::default().default_content_area,
-            ContentArea::ratio(21, 9).unwrap()
+            ContentArea::ratio(16, 9).unwrap()
         );
     }
 
@@ -726,7 +726,7 @@ mod tests {
         let mut settings = AppSettings::default();
         assert_eq!(
             settings.default_content_area,
-            ContentArea::ratio(21, 9).unwrap()
+            ContentArea::ratio(16, 9).unwrap()
         );
         settings.upsert(AppProfile {
             executable: PathBuf::from(r"C:\Games\Example.exe"),
@@ -784,7 +784,7 @@ mod tests {
         let loaded = AppSettings::load(&path).unwrap().0;
         assert_eq!(
             loaded.default_content_area,
-            ContentArea::ratio(21, 9).unwrap()
+            ContentArea::ratio(16, 9).unwrap()
         );
         assert_eq!(
             loaded.content_area_for(Path::new(r"G:\Games\Example.exe")),
@@ -982,7 +982,7 @@ mod tests {
         assert_eq!(AppSettings::load(&path).unwrap().0, cursor_shown);
 
         AppSettings::default().save(&path).unwrap();
-        assert_eq!(fs::read_to_string(&path).unwrap(), "@global|21:9\n");
+        assert_eq!(fs::read_to_string(&path).unwrap(), "@global|16:9\n");
         fs::remove_file(path).unwrap();
     }
 
@@ -1135,7 +1135,7 @@ mod tests {
         settings.save(&path).unwrap();
         assert_eq!(
             fs::read_to_string(&path).unwrap(),
-            "@global|21:9\n\
+            "@global|16:9\n\
              @effect|softness=50,blend=15,blur=80,resolution=quarter\n\
              16:9,softness=20,blend=40,blur=70,resolution=eighth,brightness=35|C:\\Games\\Custom.exe\n\
              4:3|C:\\Games\\Global.exe\n"
@@ -1194,7 +1194,7 @@ mod tests {
         settings.save(&path).unwrap();
         assert_eq!(
             fs::read_to_string(&path).unwrap(),
-            "@global|21:9\n@frame_rate|60\n"
+            "@global|16:9\n@frame_rate|60\n"
         );
         assert_eq!(AppSettings::load(&path).unwrap().0, settings);
         fs::remove_file(path).unwrap();
