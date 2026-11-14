@@ -34,6 +34,11 @@ pub fn summary(settings: &AppSettings, settings_path: &Path) -> String {
         .iter()
         .filter(|profile| profile.effect.is_some())
         .count();
+    let custom_overlays = settings
+        .profiles
+        .iter()
+        .filter(|profile| profile.show_overlays.is_some())
+        .count();
     let mut lines = vec![
         format!("nijimi {}", env!("CARGO_PKG_VERSION")),
         windows_version(),
@@ -49,9 +54,13 @@ pub fn summary(settings: &AppSettings, settings_path: &Path) -> String {
             on_off(settings.show_in_screenshots),
             on_off(settings.hide_idle_cursor),
         ),
-        format!("Default look: {}", settings.default_effect.serialize()),
         format!(
-            "Profiles: {} ({custom_looks} with their own look)",
+            "Default look: {}, Show overlays: {}",
+            settings.default_effect.serialize(),
+            on_off(settings.show_overlays)
+        ),
+        format!(
+            "Profiles: {} ({custom_looks} with their own look, {custom_overlays} with their own Show overlays)",
             settings.profiles.len()
         ),
         format!("Settings file: {settings_location}"),
@@ -200,12 +209,15 @@ mod tests {
             executable: r"C:\Users\someone\Games\Secret.exe".into(),
             aspect_ratio: crate::geometry::AspectRatio::new(16, 9).unwrap(),
             effect: None,
+            show_overlays: None,
         });
         let summary = summary(&settings, Path::new(r"C:\Elsewhere\nijimi.ini"));
         assert!(summary.starts_with(&format!("nijimi {}", env!("CARGO_PKG_VERSION"))));
         assert!(summary.contains("Windows"));
         assert!(summary.contains("CPU: "));
-        assert!(summary.contains("Profiles: 1 (0 with their own look)"));
+        assert!(
+            summary.contains("Profiles: 1 (0 with their own look, 0 with their own Show overlays)")
+        );
         assert!(!summary.contains("Secret") && !summary.contains("someone"));
     }
 }

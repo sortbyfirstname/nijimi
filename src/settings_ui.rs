@@ -146,6 +146,9 @@ fn updated_settings(
                 effect: settings
                     .profile_for(executable)
                     .and_then(|profile| profile.effect),
+                show_overlays: settings
+                    .profile_for(executable)
+                    .and_then(|profile| profile.show_overlays),
             });
         }
         SettingsPage::Add | SettingsPage::About => return None,
@@ -575,6 +578,46 @@ impl SettingsView {
         self.sync_effect_sliders(window, cx);
     }
 
+    fn set_custom_overlays(&mut self, custom: bool, cx: &mut Context<Self>) {
+        let Some(path) = self.selected_profile.clone() else {
+            return;
+        };
+        self.update_settings(
+            |settings| {
+                let global = settings.show_overlays;
+                if let Some(profile) = settings
+                    .profiles
+                    .iter_mut()
+                    .find(|profile| paths_match(&profile.executable, &path))
+                {
+                    profile.show_overlays = custom.then_some(global);
+                }
+            },
+            cx,
+        );
+    }
+
+    fn set_show_overlays(&mut self, show: bool, cx: &mut Context<Self>) {
+        let page = self.page;
+        let path = self.selected_profile.clone();
+        self.update_settings(
+            |settings| match (page, path) {
+                (SettingsPage::Global, _) => settings.show_overlays = show,
+                (SettingsPage::Program, Some(path)) => {
+                    if let Some(profile) = settings
+                        .profiles
+                        .iter_mut()
+                        .find(|profile| paths_match(&profile.executable, &path))
+                    {
+                        profile.show_overlays = Some(show);
+                    }
+                }
+                _ => {}
+            },
+            cx,
+        );
+    }
+
     fn restore_ratio(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if AspectRatio::parse(&self.ratio.read(cx).value()).is_none() {
             self.sync_ratio_text(window, cx);
@@ -709,6 +752,7 @@ impl SettingsView {
             executable: executable.clone(),
             aspect_ratio: self.settings.default_aspect_ratio,
             effect: None,
+            show_overlays: None,
         });
         if let Err(error) = updated.save(&self.settings_path) {
             self.error = Some(format!("Could not save settings: {error}"));
@@ -1099,6 +1143,7 @@ impl SettingsView {
                 "The selected content area stays clear; ambient blur fills the space outside it.",
             ))
             .child(self.render_effect_card(cx))
+            .child(self.render_overlays_card(cx))
             .child(
                 Button::new("remove-profile")
                     .cursor_pointer()
@@ -1139,6 +1184,7 @@ impl SettingsView {
                 "New profiles start with this ratio. Existing app settings are not changed.",
             ))
             .child(self.render_effect_card(cx))
+            .child(self.render_overlays_card(cx))
             .child(
                 toggle_card(
                     "Frame rate",
@@ -1600,6 +1646,65 @@ impl SettingsView {
             )
     }
 
+    fn render_overlays_card(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let program = self.page == SettingsPage::Program;
+        let custom = self
+            .selected_profile
+            .as_deref()
+            .filter(|_| program)
+            .and_then(|path| self.settings.profile_for(path))
+            .and_then(|profile| profile.show_overlays);
+        let editable = !program || custom.is_some();
+        let show = custom.unwrap_or(self.settings.show_overlays);
+        let custom_row = program.then(|| {
+            setting_row(
+                "Custom setting for this app",
+                "When off, this app follows the setting in Global settings.",
+            )
+            .child(
+                Switch::new("custom-overlays")
+                    .checked(custom.is_some())
+                    .cursor_pointer()
+                    .on_click(cx.listener(|this, checked: &bool, _, cx| {
+                        this.set_custom_overlays(*checked, cx);
+                    })),
+            )
+        });
+
+        div()
+            .flex()
+            .flex_col()
+            .gap_4()
+            .p_5()
+            .rounded_lg()
+            .bg(rgb(0x252525))
+            .border_1()
+            .border_color(rgb(0x383838))
+            .child(
+                div()
+                    .pb_3()
+                    .border_b_1()
+                    .border_color(rgb(0x3a3a3a))
+                    .child(div().text_xs().text_color(rgb(0xa6a6a6)).child("OVERLAYS")),
+            )
+            .children(custom_row)
+            .child(
+                setting_row(
+                    "Show overlays",
+                    "Let Steam notifications, the Steam overlay and anything else a game draws in its bars show through the glow, while it fills the screen. Turn off for games that draw artwork in their bars. Not available while Show in screenshots is on.",
+                )
+                .child(
+                    Switch::new("show-overlays")
+                        .checked(show)
+                        .disabled(!editable)
+                        .when(editable, |switch| switch.cursor_pointer())
+                        .on_click(cx.listener(|this, checked: &bool, _, cx| {
+                            this.set_show_overlays(*checked, cx);
+                        })),
+                ),
+            )
+    }
+
     fn render_ratio_card(&self, label: &'static str, cx: &mut Context<Self>) -> impl IntoElement {
         let preset_buttons = ASPECT_PRESETS.iter().enumerate().map(|(index, preset)| {
             let preset_value = (*preset).to_owned();
@@ -1819,6 +1924,7 @@ mod tests {
             executable: executable.clone(),
             aspect_ratio: AspectRatio::new(16, 9).unwrap(),
             effect: None,
+            show_overlays: None,
         });
 
         let updated =
@@ -1836,6 +1942,7 @@ mod tests {
             executable: executable.clone(),
             aspect_ratio: AspectRatio::new(16, 9).unwrap(),
             effect: None,
+            show_overlays: None,
         });
 
         let updated = updated_settings(&settings, SettingsPage::Global, None, "16:10").unwrap();
@@ -1868,6 +1975,7 @@ mod tests {
             executable: executable.clone(),
             aspect_ratio: AspectRatio::new(16, 9).unwrap(),
             effect: Some(custom),
+            show_overlays: None,
         });
 
         let updated =
@@ -1896,6 +2004,7 @@ mod tests {
                 blur: 90,
                 ..EffectSettings::default()
             }),
+            show_overlays: None,
         });
         let global = settings.default_effect;
 
@@ -1919,6 +2028,7 @@ mod tests {
             executable: executable.clone(),
             aspect_ratio: AspectRatio::new(16, 9).unwrap(),
             effect: None,
+            show_overlays: None,
         });
         let soften = |effect: &mut EffectSettings| effect.edge_blend = 50;
 

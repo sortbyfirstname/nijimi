@@ -2,7 +2,7 @@ use std::mem::size_of;
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
-use windows::Win32::Foundation::{BOOL, COLORREF, E_ACCESSDENIED, HWND, RECT};
+use windows::Win32::Foundation::{BOOL, COLORREF, E_ACCESSDENIED, HWND, POINT, RECT};
 use windows::Win32::Graphics::Direct3D::{
     D3D_DRIVER_TYPE, D3D_DRIVER_TYPE_UNKNOWN, D3D_FEATURE_LEVEL_10_0, D3D_FEATURE_LEVEL_10_1,
     D3D_FEATURE_LEVEL_11_0, D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST, D3D_SRV_DIMENSION_TEXTURE2D,
@@ -22,7 +22,7 @@ use windows::Win32::Graphics::DirectComposition::{
     DCompositionCreateDevice, IDCompositionDevice, IDCompositionTarget,
 };
 use windows::Win32::Graphics::Dxgi::Common::{
-    DXGI_ALPHA_MODE_PREMULTIPLIED, DXGI_FORMAT, DXGI_FORMAT_B8G8R8A8_UNORM,
+    DXGI_ALPHA_MODE_PREMULTIPLIED, DXGI_FORMAT, DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_R8_UNORM,
     DXGI_FORMAT_R10G10B10A2_UNORM, DXGI_FORMAT_R16G16B16A16_FLOAT, DXGI_SAMPLE_DESC,
 };
 use windows::Win32::Graphics::Dxgi::{
@@ -32,14 +32,14 @@ use windows::Win32::Graphics::Dxgi::{
     DXGI_USAGE_RENDER_TARGET_OUTPUT, IDXGIAdapter, IDXGIAdapter1, IDXGIDevice, IDXGIFactory2,
     IDXGIOutput1, IDXGIOutputDuplication, IDXGISwapChain1,
 };
-use windows::Win32::Graphics::Gdi::{MONITOR_DEFAULTTOPRIMARY, MonitorFromPoint};
+use windows::Win32::Graphics::Gdi::{ClientToScreen, MONITOR_DEFAULTTOPRIMARY, MonitorFromPoint};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, GW_HWNDPREV, GetForegroundWindow, GetWindow, HWND_TOPMOST,
-    LWA_ALPHA, RegisterClassW, SW_HIDE, SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
-    SetLayeredWindowAttributes, SetWindowDisplayAffinity, SetWindowPos, ShowWindow,
-    WDA_EXCLUDEFROMCAPTURE, WDA_NONE, WINDOW_DISPLAY_AFFINITY, WINDOW_EX_STYLE, WINDOW_STYLE,
-    WNDCLASSW,
+    CreateWindowExW, DefWindowProcW, GW_HWNDPREV, GetClientRect, GetForegroundWindow, GetWindow,
+    HWND_TOPMOST, LWA_ALPHA, RegisterClassW, SW_HIDE, SW_SHOWNOACTIVATE, SWP_NOACTIVATE,
+    SWP_NOMOVE, SWP_NOSIZE, SetLayeredWindowAttributes, SetWindowDisplayAffinity, SetWindowPos,
+    ShowWindow, WDA_EXCLUDEFROMCAPTURE, WDA_NONE, WINDOW_DISPLAY_AFFINITY, WINDOW_EX_STYLE,
+    WINDOW_STYLE, WNDCLASSW,
 };
 use windows::core::{Error, HRESULT, Interface, Result, w};
 
@@ -63,6 +63,8 @@ const MAX_BLUR_RADIUS: f32 = 128.0;
 const CAPTURE_RETRY_INITIAL: Duration = Duration::from_millis(250);
 const CAPTURE_RETRY_MAX: Duration = Duration::from_secs(4);
 const INITIAL_FRAME_TIMEOUT_MS: u32 = 100;
+/// Screen pixels per overlay mask texel. Must match `OVERLAY_BLOCK` in `ambient.hlsl`.
+const OVERLAY_BLOCK: u32 = 8;
 static OVERLAY_CLASS_REGISTERED: OnceLock<()> = OnceLock::new();
 
 /// The GPU side only exists while an app is active, so an idle tray holds no device or textures.
@@ -74,6 +76,7 @@ pub struct Renderer {
     aspect_ratio: AspectRatio,
     effect: EffectSettings,
     capturable: bool,
+    show_overlays: bool,
     scene: SceneGeometry,
     gpu: Option<Gpu>,
     rebuild_retry: CaptureRetry,
@@ -117,7 +120,8 @@ struct SceneConstants {
     edge_inset: f32,
     glow_downsample: f32,
     bar_brightness: f32,
-    _padding: f32,
+    /// 0 or 1.
+    overlay_passthrough: f32,
 }
 
 impl Default for SceneConstants {
@@ -132,7 +136,7 @@ impl Default for SceneConstants {
             edge_inset: 0.0,
             glow_downsample: 4.0,
             bar_brightness: 1.0,
-            _padding: 0.0,
+            overlay_passthrough: 0.0,
         }
     }
 }
@@ -222,7 +226,7 @@ impl SceneGeometry {
                 edge_inset: edge_inset as f32,
                 glow_downsample: blur_scale.glow as f32,
                 bar_brightness: strength(effect.brightness),
-                _padding: 0.0,
+                overlay_passthrough: 0.0,
             },
         })
     }
@@ -287,6 +291,10 @@ struct BlurTargets {
     wide_horizontal: BlurTarget,
     wide: BlurTarget,
     ambient: BlurTarget,
+    mask_width: u32,
+    mask_height: u32,
+    overlay_mask: BlurTarget,
+    overlay_grown: BlurTarget,
 }
 
 impl BlurTargets {
@@ -296,12 +304,9 @@ impl BlurTargets {
         let glow_level = (scale.glow / scale.prefilter).ilog2();
         let blur_width = (prefilter_width >> glow_level).max(1);
         let blur_height = (prefilter_height >> glow_level).max(1);
-        let target_with_mips = |format: DXGI_FORMAT, mipped: bool| {
-            let (width, height) = if mipped {
-                (prefilter_width, prefilter_height)
-            } else {
-                (blur_width, blur_height)
-            };
+        let mask_width = width.div_ceil(OVERLAY_BLOCK);
+        let mask_height = height.div_ceil(OVERLAY_BLOCK);
+        let create = |width: u32, height: u32, format: DXGI_FORMAT, mipped: bool| {
             create_blur_target(
                 device,
                 &D3D11_TEXTURE2D_DESC {
@@ -326,9 +331,15 @@ impl BlurTargets {
                 },
             )
         };
-        let target = |format: DXGI_FORMAT| target_with_mips(format, false);
+        let target = |format: DXGI_FORMAT| create(blur_width, blur_height, format, false);
+        let mask = || create(mask_width, mask_height, DXGI_FORMAT_R8_UNORM, false);
         // Its mip chain gives the edge blend a blur whose radius can vary per pixel.
-        let prefilter = target_with_mips(DXGI_FORMAT_R10G10B10A2_UNORM, true)?;
+        let prefilter = create(
+            prefilter_width,
+            prefilter_height,
+            DXGI_FORMAT_R10G10B10A2_UNORM,
+            true,
+        )?;
         let glow_source = if glow_level == 0 {
             prefilter.view.clone()
         } else {
@@ -363,6 +374,10 @@ impl BlurTargets {
             wide_horizontal: target(DXGI_FORMAT_R10G10B10A2_UNORM)?,
             wide: target(DXGI_FORMAT_R10G10B10A2_UNORM)?,
             ambient: target(DXGI_FORMAT_R16G16B16A16_FLOAT)?,
+            mask_width,
+            mask_height,
+            overlay_mask: mask()?,
+            overlay_grown: mask()?,
         })
     }
 }
@@ -406,6 +421,8 @@ struct AmbientShaders {
     wide_vertical: ID3D11PixelShader,
     blur: ID3D11PixelShader,
     composite: ID3D11PixelShader,
+    overlay_mask: ID3D11PixelShader,
+    overlay_grow: ID3D11PixelShader,
     sampler: ID3D11SamplerState,
     rasterizer: ID3D11RasterizerState,
 }
@@ -450,6 +467,8 @@ impl AmbientShaders {
                 wide_vertical: create_pixel_shader(device, PS_BLUR_WIDE_VERTICAL)?,
                 blur: create_pixel_shader(device, PS_BLUR)?,
                 composite: create_pixel_shader(device, PS_COMPOSITE)?,
+                overlay_mask: create_pixel_shader(device, PS_OVERLAY_MASK)?,
+                overlay_grow: create_pixel_shader(device, PS_OVERLAY_GROW)?,
                 sampler: sampler.ok_or_else(Error::from_win32)?,
                 rasterizer: rasterizer.ok_or_else(Error::from_win32)?,
             })
@@ -596,6 +615,7 @@ impl Renderer {
                 aspect_ratio,
                 effect,
                 capturable,
+                show_overlays: false,
                 scene,
                 gpu: None,
                 rebuild_retry: CaptureRetry::default(),
@@ -616,6 +636,25 @@ impl Renderer {
     fn reset_idle_cursor(&mut self) {
         if let Some(idle_cursor) = &mut self.idle_cursor {
             idle_cursor.reset();
+        }
+    }
+
+    pub fn set_show_overlays(&mut self, show: bool) {
+        self.show_overlays = show;
+    }
+
+    /// A window that doesn't fill the screen leaves other windows in the bars. A capturable
+    /// overlay would see its own glow and mask it.
+    fn update_overlay_passthrough(&mut self) {
+        let passthrough = self.show_overlays
+            && !self.capturable
+            && foreground_fills_screen(self.width, self.height);
+        if (self.scene.constants.overlay_passthrough > 0.0) == passthrough {
+            return;
+        }
+        self.scene.constants.overlay_passthrough = if passthrough { 1.0 } else { 0.0 };
+        if let Some(gpu) = self.gpu.as_mut() {
+            gpu.up_to_date = false;
         }
     }
 
@@ -711,6 +750,7 @@ impl Renderer {
         self.set_enabled(false);
         let mut replacement = Self::with_options(self.aspect_ratio, self.effect, self.capturable)?;
         replacement.set_hide_idle_cursor(self.idle_cursor.is_some());
+        replacement.set_show_overlays(self.show_overlays);
         replacement.set_enabled(enabled);
         *self = replacement;
         Ok(())
@@ -746,6 +786,7 @@ impl Renderer {
                 return Ok(());
             }
         }
+        self.update_overlay_passthrough();
         let gpu = self.gpu.as_mut().unwrap();
         let capture = match gpu.render(&self.scene) {
             Ok(capture) => capture,
@@ -791,6 +832,26 @@ impl Renderer {
                 above = GetWindow(window, GW_HWNDPREV);
             }
         }
+    }
+}
+
+fn foreground_fills_screen(width: u32, height: u32) -> bool {
+    unsafe {
+        let foreground = GetForegroundWindow();
+        if foreground.0.is_null() {
+            return false;
+        }
+        let mut client = RECT::default();
+        let mut origin = POINT::default();
+        if GetClientRect(foreground, &mut client).is_err()
+            || !ClientToScreen(foreground, &mut origin).as_bool()
+        {
+            return false;
+        }
+        origin.x <= 0
+            && origin.y <= 0
+            && origin.x + client.right >= width as i32
+            && origin.y + client.bottom >= height as i32
     }
 }
 
@@ -1106,7 +1167,7 @@ unsafe fn draw_ambient(pass: AmbientPass<'_>) -> Result<()> {
                 width: blur.prefilter_width,
                 height: blur.prefilter_height,
                 pixel_shader: &shaders.prepare,
-                sources: [Some(source.clone()), None, None, None],
+                sources: [Some(source.clone()), None, None, None, None],
                 scissors: &[RECT {
                     left: 0,
                     top: 0,
@@ -1115,42 +1176,47 @@ unsafe fn draw_ambient(pass: AmbientPass<'_>) -> Result<()> {
                 }],
             },
         );
-        let blur_pass = |target: &BlurTarget,
-                         pixel_shader: &ID3D11PixelShader,
-                         sources: [Option<ID3D11ShaderResourceView>; 4]| {
-            draw_fullscreen_pass(
-                &pipeline,
-                FullscreenPass {
-                    render_target: &target.render_target,
-                    width: blur.width,
-                    height: blur.height,
-                    pixel_shader,
-                    sources,
-                    scissors: &glow_scissors,
-                },
-            );
-        };
+        let blur_pass =
+            |target: &BlurTarget, pixel_shader: &ID3D11PixelShader, sources: ShaderSources| {
+                draw_fullscreen_pass(
+                    &pipeline,
+                    FullscreenPass {
+                        render_target: &target.render_target,
+                        width: blur.width,
+                        height: blur.height,
+                        pixel_shader,
+                        sources,
+                        scissors: &glow_scissors,
+                    },
+                );
+            };
         context.OMSetRenderTargets(None, None::<&ID3D11DepthStencilView>);
         context.GenerateMips(&blur.prefilter.view);
         blur_pass(
             &blur.horizontal,
             &shaders.horizontal,
-            [None, Some(blur.glow_source.clone()), None, None],
+            [None, Some(blur.glow_source.clone()), None, None, None],
         );
         blur_pass(
             &blur.narrow,
             &shaders.vertical,
-            [None, Some(blur.horizontal.view.clone()), None, None],
+            [None, Some(blur.horizontal.view.clone()), None, None, None],
         );
         blur_pass(
             &blur.wide_horizontal,
             &shaders.wide_horizontal,
-            [None, Some(blur.narrow.view.clone()), None, None],
+            [None, Some(blur.narrow.view.clone()), None, None, None],
         );
         blur_pass(
             &blur.wide,
             &shaders.wide_vertical,
-            [None, Some(blur.wide_horizontal.view.clone()), None, None],
+            [
+                None,
+                Some(blur.wide_horizontal.view.clone()),
+                None,
+                None,
+                None,
+            ],
         );
         blur_pass(
             &blur.ambient,
@@ -1160,8 +1226,42 @@ unsafe fn draw_ambient(pass: AmbientPass<'_>) -> Result<()> {
                 Some(blur.wide.view.clone()),
                 Some(blur.narrow.view.clone()),
                 None,
+                None,
             ],
         );
+
+        let overlays = scene.constants.overlay_passthrough > 0.0;
+        if overlays {
+            let mask_pass =
+                |target: &BlurTarget, pixel_shader: &ID3D11PixelShader, sources: ShaderSources| {
+                    draw_fullscreen_pass(
+                        &pipeline,
+                        FullscreenPass {
+                            render_target: &target.render_target,
+                            width: blur.mask_width,
+                            height: blur.mask_height,
+                            pixel_shader,
+                            sources,
+                            scissors: &[RECT {
+                                left: 0,
+                                top: 0,
+                                right: blur.mask_width as i32,
+                                bottom: blur.mask_height as i32,
+                            }],
+                        },
+                    );
+                };
+            mask_pass(
+                &blur.overlay_mask,
+                &shaders.overlay_mask,
+                [Some(source.clone()), None, None, None, None],
+            );
+            mask_pass(
+                &blur.overlay_grown,
+                &shaders.overlay_grow,
+                [None, None, None, None, Some(blur.overlay_mask.view.clone())],
+            );
+        }
 
         context.ClearRenderTargetView(render_target, &[0.0, 0.0, 0.0, 0.0]);
         draw_fullscreen_pass(
@@ -1176,6 +1276,7 @@ unsafe fn draw_ambient(pass: AmbientPass<'_>) -> Result<()> {
                     Some(blur.ambient.view.clone()),
                     None,
                     Some(blur.prefilter.view.clone()),
+                    overlays.then(|| blur.overlay_grown.view.clone()),
                 ],
                 scissors: &screen_scissors,
             },
@@ -1223,12 +1324,15 @@ struct FullscreenPipeline<'a> {
     rasterizer: &'a ID3D11RasterizerState,
 }
 
+/// `t0`..`t4` in `ambient.hlsl`.
+type ShaderSources = [Option<ID3D11ShaderResourceView>; 5];
+
 struct FullscreenPass<'a> {
     render_target: &'a ID3D11RenderTargetView,
     width: u32,
     height: u32,
     pixel_shader: &'a ID3D11PixelShader,
-    sources: [Option<ID3D11ShaderResourceView>; 4],
+    sources: ShaderSources,
     scissors: &'a [RECT],
 }
 
@@ -1271,7 +1375,7 @@ unsafe fn draw_fullscreen_pass(pipeline: &FullscreenPipeline<'_>, pass: Fullscre
         }
         pipeline
             .context
-            .PSSetShaderResources(0, Some(&[None, None, None, None]));
+            .PSSetShaderResources(0, Some(&[None, None, None, None, None]));
     }
 }
 
@@ -1334,6 +1438,8 @@ const PS_BLUR_WIDE_HORIZONTAL: &[u8] = shader_bytecode!("PSBlurWideHorizontal");
 const PS_BLUR_WIDE_VERTICAL: &[u8] = shader_bytecode!("PSBlurWideVertical");
 const PS_BLUR: &[u8] = shader_bytecode!("PSBlur");
 const PS_COMPOSITE: &[u8] = shader_bytecode!("PSComposite");
+const PS_OVERLAY_MASK: &[u8] = shader_bytecode!("PSOverlayMask");
+const PS_OVERLAY_GROW: &[u8] = shader_bytecode!("PSOverlayGrow");
 
 unsafe fn create_vertex_shader(device: &ID3D11Device) -> Result<ID3D11VertexShader> {
     let mut shader = None;
@@ -1384,6 +1490,7 @@ mod tests {
         edge_blend: u32,
         edge_softness: u32,
         bar_brightness: Option<f32>,
+        overlay_passthrough: bool,
     }
 
     const TEST_BLUR_SCALE: u32 = 4;
@@ -1417,7 +1524,7 @@ mod tests {
                 edge_inset: edge_inset as f32,
                 glow_downsample: TEST_BLUR_SCALE as f32,
                 bar_brightness: 1.0,
-                _padding: 0.0,
+                overlay_passthrough: 0.0,
                 blur_sigma: 1.5,
                 blur_radius: 5.0,
                 edge_blend: edge_blend as f32,
@@ -1552,6 +1659,9 @@ mod tests {
             let mut scene = test_scene(content, pattern.edge_blend, pattern.edge_softness);
             if let Some(brightness) = pattern.bar_brightness {
                 scene.constants.bar_brightness = brightness;
+            }
+            if pattern.overlay_passthrough {
+                scene.constants.overlay_passthrough = 1.0;
             }
             let scene_buffer = create_scene_buffer(&device)?;
             let shaders = AmbientShaders::new(&device)?;
@@ -2113,6 +2223,101 @@ mod tests {
             bright[sample][3] > 100,
             "bright margin pixels must not disable the configured effect"
         );
+    }
+
+    #[test]
+    fn overlays_drawn_in_the_bars_show_through_and_the_rest_keeps_glowing() {
+        let content = ScreenRect {
+            left: 8,
+            top: 4,
+            right: 32,
+            bottom: 20,
+        };
+        let render = |overlay_passthrough| {
+            let pattern = TestPattern {
+                overlay_passthrough,
+                ..TestPattern::default()
+            };
+            render_scene_with_frame(content, [0, 0, 0, 255], [30, 150, 230, 255], true, pattern)
+                .unwrap()
+        };
+        let covered = render(false);
+        let shown = render(true);
+        let pixel = |scene: &[[u8; 4]], x: u32, y: u32| scene[(y * WIDTH + x) as usize];
+        assert!(
+            pixel(&covered, 2, 12)[3] > 100,
+            "the glow covers it when off"
+        );
+        assert_eq!(pixel(&shown, 2, 12), [0, 0, 0, 0], "it shows through");
+        for (x, y) in [(37, 12), (36, 1), (36, 22)] {
+            assert_eq!(
+                pixel(&shown, x, y),
+                pixel(&covered, x, y),
+                "({x}, {y}) is far from it and keeps its glow"
+            );
+        }
+    }
+
+    #[test]
+    fn an_overlay_over_the_bars_shows_through_the_whole_softened_picture_edge() {
+        let content = ScreenRect {
+            left: 8,
+            top: 0,
+            right: 32,
+            bottom: HEIGHT as i32,
+        };
+        let render = |overlay_passthrough| {
+            let pattern = TestPattern {
+                edge_softness: 6,
+                overlay_passthrough,
+                ..TestPattern::default()
+            };
+            render_scene_with_frame(
+                content,
+                [120, 120, 130, 255],
+                [200, 60, 40, 255],
+                false,
+                pattern,
+            )
+            .unwrap()
+        };
+        let covered = render(false);
+        let shown = render(true);
+        let alpha = |scene: &[[u8; 4]], x: u32| scene[(12 * WIDTH + x) as usize][3];
+        assert!(
+            alpha(&covered, 9) > 100,
+            "the strip covers the picture's edge"
+        );
+        for x in (0..14).chain(26..WIDTH) {
+            assert_eq!(alpha(&shown, x), 0, "column {x} shows through");
+        }
+    }
+
+    #[test]
+    fn the_picture_and_near_black_bars_never_show_through() {
+        let content = ScreenRect {
+            left: 8,
+            top: 4,
+            right: 32,
+            bottom: 20,
+        };
+        let render = |overlay_passthrough| {
+            let pattern = TestPattern {
+                edge_blend: 6,
+                edge_softness: 2,
+                overlay_passthrough,
+                ..TestPattern::default()
+            };
+            render_scene_with_frame(
+                content,
+                [16, 16, 16, 255],
+                [240, 240, 240, 255],
+                false,
+                pattern,
+            )
+            .unwrap()
+        };
+        assert_eq!(render(true), render(false));
     }
 
     #[test]

@@ -723,6 +723,7 @@ fn apply_foreground(state: &mut AppState) -> Option<String> {
     if state.rendering && state.active.as_ref() == Some(&selected) {
         return None;
     }
+    state.renderer.set_show_overlays(selected.show_overlays);
     if let Err(error) = state
         .renderer
         .configure(selected.aspect_ratio, selected.effect)

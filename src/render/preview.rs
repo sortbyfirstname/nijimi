@@ -181,6 +181,7 @@ impl Preview {
                         Some(self.sample.clone()),
                         None,
                         None,
+                        None,
                     ],
                     scissors: &whole,
                 },
@@ -206,6 +207,7 @@ impl Preview {
                     sources: [
                         Some(targets.screen.view.clone()),
                         Some(targets.overlay.view.clone()),
+                        None,
                         None,
                         None,
                     ],

@@ -124,8 +124,12 @@ fn gpu_ms(
     screen: &Screen,
     aspect_ratio: AspectRatio,
     effect: EffectSettings,
+    overlays: bool,
 ) -> (f64, f64) {
-    let scene = SceneGeometry::new(screen.width, screen.height, aspect_ratio, effect).unwrap();
+    let mut scene = SceneGeometry::new(screen.width, screen.height, aspect_ratio, effect).unwrap();
+    if overlays {
+        scene.constants.overlay_passthrough = 1.0;
+    }
     let blur = BlurTargets::new(device, screen.width, screen.height, scene.blur_scale).unwrap();
     let scene_buffer = create_scene_buffer(device).unwrap();
     let draw = || unsafe {
@@ -193,7 +197,7 @@ fn bench_gpu_cost_per_frame() {
     let (device, context) = create_device(None, D3D_DRIVER_TYPE_HARDWARE).unwrap();
     let shaders = AmbientShaders::new(&device).unwrap();
     let looks = [
-        ("default", EffectSettings::default()),
+        ("default", EffectSettings::default(), false),
         (
             "maximum",
             EffectSettings {
@@ -202,18 +206,27 @@ fn bench_gpu_cost_per_frame() {
                 blur: 100,
                 ..EffectSettings::default()
             },
+            false,
         ),
+        ("overlays", EffectSettings::default(), true),
     ];
     println!("screen     content  look     resolution  median ms  p95 ms");
     for (width, height) in [(5120, 2160), (3840, 2160), (2560, 1440)] {
         let screen = screen(&device, width, height);
         for (ratio_width, ratio_height) in [(16, 9), (4, 3)] {
             let aspect_ratio = AspectRatio::new(ratio_width, ratio_height).unwrap();
-            for (name, look) in looks {
+            for (name, look, overlays) in looks {
                 for resolution in BlurResolution::ALL {
                     let effect = EffectSettings { resolution, ..look };
-                    let (median, p95) =
-                        gpu_ms(&device, &context, &shaders, &screen, aspect_ratio, effect);
+                    let (median, p95) = gpu_ms(
+                        &device,
+                        &context,
+                        &shaders,
+                        &screen,
+                        aspect_ratio,
+                        effect,
+                        overlays,
+                    );
                     println!(
                         "{width}x{height}  {ratio_width:>2}:{ratio_height:<2}    {name:<8} {:<10}  {median:>9.3}  {p95:>6.3}",
                         resolution.label()

@@ -162,6 +162,14 @@ pub struct AppProfile {
     pub aspect_ratio: AspectRatio,
     /// `None` follows the global effect settings.
     pub effect: Option<EffectSettings>,
+    /// `None` follows the global setting.
+    pub show_overlays: Option<bool>,
+}
+
+impl AppProfile {
+    pub fn shows_overlays(&self, settings: &AppSettings) -> bool {
+        self.show_overlays.unwrap_or(settings.show_overlays)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -171,6 +179,7 @@ pub struct AppSettings {
     pub always_on: bool,
     pub show_in_screenshots: bool,
     pub hide_idle_cursor: bool,
+    pub show_overlays: bool,
     pub frame_rate: FrameRate,
     pub profiles: Vec<AppProfile>,
 }
@@ -183,6 +192,7 @@ impl Default for AppSettings {
             always_on: false,
             show_in_screenshots: false,
             hide_idle_cursor: true,
+            show_overlays: true,
             frame_rate: FrameRate::default(),
             profiles: Vec::new(),
         }
@@ -195,6 +205,7 @@ pub struct ActiveProfile {
     pub executable: Option<PathBuf>,
     pub aspect_ratio: AspectRatio,
     pub effect: EffectSettings,
+    pub show_overlays: bool,
 }
 
 impl AspectRatio {
@@ -256,10 +267,23 @@ impl AppSettings {
             "@always_on" => self.always_on = parse_flag(executable)?,
             "@show_in_screenshots" => self.show_in_screenshots = parse_flag(executable)?,
             "@hide_idle_cursor" => self.hide_idle_cursor = parse_flag(executable)?,
+            "@show_overlays" => self.show_overlays = parse_flag(executable)?,
             _ => {
-                let (ratio, effect) = match ratio.split_once(',') {
-                    Some((ratio, effect)) => (ratio, Some(EffectSettings::parse(effect)?)),
-                    None => (ratio, None),
+                let (ratio, options) = ratio.split_once(',').unwrap_or((ratio, ""));
+                let mut show_overlays = None;
+                let mut effect_pairs = Vec::new();
+                for pair in options.split(',').filter(|pair| !pair.trim().is_empty()) {
+                    match pair.split_once('=') {
+                        Some((key, value)) if key.trim() == "overlays" => {
+                            show_overlays = Some(parse_flag(value)?);
+                        }
+                        _ => effect_pairs.push(pair),
+                    }
+                }
+                let effect = if effect_pairs.is_empty() {
+                    None
+                } else {
+                    Some(EffectSettings::parse(&effect_pairs.join(","))?)
                 };
                 let aspect_ratio = AspectRatio::parse(ratio)?;
                 let executable = executable.trim();
@@ -270,6 +294,7 @@ impl AppSettings {
                     executable: PathBuf::from(executable),
                     aspect_ratio,
                     effect,
+                    show_overlays,
                 });
             }
         }
@@ -295,6 +320,9 @@ impl AppSettings {
         if !self.hide_idle_cursor {
             contents.push_str("@hide_idle_cursor|0\n");
         }
+        if !self.show_overlays {
+            contents.push_str("@show_overlays|0\n");
+        }
         if self.frame_rate != FrameRate::default() {
             contents.push_str(&format!("@frame_rate|{}\n", self.frame_rate.key()));
         }
@@ -311,12 +339,16 @@ impl AppSettings {
                     "executable path contains a reserved settings character",
                 ));
             }
-            let effect = profile
+            let mut options = profile
                 .effect
                 .map(|effect| format!(",{}", effect.serialize()))
                 .unwrap_or_default();
+            // Omitted when following the global setting, so older builds can read the line.
+            if let Some(show) = profile.show_overlays {
+                options.push_str(if show { ",overlays=1" } else { ",overlays=0" });
+            }
             contents.push_str(&format!(
-                "{}:{}{effect}|{executable}\n",
+                "{}:{}{options}|{executable}\n",
                 profile.aspect_ratio.width, profile.aspect_ratio.height
             ));
         }
@@ -376,6 +408,7 @@ impl AppSettings {
                     executable: Some(executable.to_path_buf()),
                     aspect_ratio: profile.aspect_ratio,
                     effect: profile.effect.unwrap_or(self.default_effect),
+                    show_overlays: profile.shows_overlays(self),
                 })
             });
         if profile.is_none() && self.always_on {
@@ -383,6 +416,7 @@ impl AppSettings {
                 executable: None,
                 aspect_ratio: self.default_aspect_ratio,
                 effect: self.default_effect,
+                show_overlays: self.show_overlays,
             });
         }
         profile
@@ -696,12 +730,14 @@ mod tests {
             executable: PathBuf::from(r"C:\Games\Example.exe"),
             aspect_ratio: AspectRatio::new(16, 9).unwrap(),
             effect: None,
+            show_overlays: None,
         });
         settings.default_aspect_ratio = AspectRatio::new(21, 9).unwrap();
         settings.upsert(AppProfile {
             executable: PathBuf::from(r"c:\games\example.EXE"),
             aspect_ratio: AspectRatio::new(16, 9).unwrap(),
             effect: None,
+            show_overlays: None,
         });
 
         settings.save(&path).unwrap();
@@ -719,6 +755,7 @@ mod tests {
             executable: PathBuf::from(r"C:\Games\Example.exe"),
             aspect_ratio: AspectRatio::new(32, 9).unwrap(),
             effect: None,
+            show_overlays: None,
         });
         loaded.save(&path).unwrap();
         loaded = AppSettings::load(&path).unwrap().0;
@@ -768,6 +805,7 @@ mod tests {
             executable: PathBuf::from(r"C:\Games\Shared.exe"),
             aspect_ratio: AspectRatio::new(16, 9).unwrap(),
             effect: None,
+            show_overlays: None,
         }];
         let choices = add_app_choices(
             &recent,
@@ -792,6 +830,7 @@ mod tests {
             executable: PathBuf::from(path),
             aspect_ratio: AspectRatio::new(16, 9).unwrap(),
             effect: None,
+            show_overlays: None,
         };
         let profiles = [
             profile(r"G:\Games\P5R.exe"),
@@ -839,6 +878,7 @@ mod tests {
             executable: PathBuf::from(r"C:\Games\Example.exe"),
             aspect_ratio: AspectRatio::new(21, 9).unwrap(),
             effect: None,
+            show_overlays: None,
         });
         let matching = Path::new(r"c:\games\EXAMPLE.EXE");
         assert_eq!(
@@ -847,6 +887,7 @@ mod tests {
                 executable: Some(matching.to_path_buf()),
                 aspect_ratio: AspectRatio::new(21, 9).unwrap(),
                 effect: EffectSettings::default(),
+                show_overlays: true,
             })
         );
         assert_eq!(settings.active_profile(false, true, Some(matching)), None);
@@ -869,12 +910,14 @@ mod tests {
             executable: PathBuf::from(r"C:\Games\Example.exe"),
             aspect_ratio: AspectRatio::new(4, 3).unwrap(),
             effect: None,
+            show_overlays: None,
         });
         let profiled = Path::new(r"C:\Games\Example.exe");
         let default = Some(ActiveProfile {
             executable: None,
             aspect_ratio: AspectRatio::new(16, 9).unwrap(),
             effect: EffectSettings::default(),
+            show_overlays: true,
         });
 
         assert_eq!(
@@ -883,6 +926,7 @@ mod tests {
                 executable: Some(profiled.to_path_buf()),
                 aspect_ratio: AspectRatio::new(4, 3).unwrap(),
                 effect: EffectSettings::default(),
+                show_overlays: true,
             })
         );
         assert_eq!(
@@ -941,6 +985,97 @@ mod tests {
     }
 
     #[test]
+    fn profile_overlays_follow_the_global_setting_unless_overridden() {
+        let profile = |line: &str| parse_all(line).unwrap().profiles.remove(0);
+        assert_eq!(profile("16:9|C:\\Games\\Follow.exe\n").show_overlays, None);
+        assert_eq!(
+            profile("16:9,overlays=1|C:\\Games\\On.exe\n").show_overlays,
+            Some(true)
+        );
+        let off = profile("16:9,overlays=0|C:\\Games\\Off.exe\n");
+        assert!(off.show_overlays == Some(false) && off.effect.is_none());
+        let custom = profile("16:9,blur=30,overlays=0,brightness=50|C:\\Games\\Custom.exe\n");
+        assert_eq!(custom.show_overlays, Some(false));
+        assert_eq!(
+            custom.effect.map(|effect| (effect.blur, effect.brightness)),
+            Some((30, 50))
+        );
+        assert!(parse_all("16:9,overlays=maybe|C:\\Games\\Bad.exe\n").is_err());
+
+        let mut settings = parse_all("@always_on|1\n@show_overlays|0\n").unwrap();
+        assert!(!settings.show_overlays);
+        for (name, show_overlays) in [("Follow.exe", None), ("On.exe", Some(true))] {
+            settings.upsert(AppProfile {
+                executable: PathBuf::from(format!(r"C:\Games\{name}")),
+                aspect_ratio: AspectRatio::new(16, 9).unwrap(),
+                effect: None,
+                show_overlays,
+            });
+        }
+        let shows = |settings: &AppSettings, name: &str| {
+            let path = PathBuf::from(format!(r"C:\Games\{name}"));
+            settings
+                .active_profile(true, true, Some(&path))
+                .unwrap()
+                .show_overlays
+        };
+        assert!(!shows(&settings, "Follow.exe"));
+        assert!(shows(&settings, "On.exe"));
+        assert!(
+            !shows(&settings, "Unprofiled.exe"),
+            "Always on uses the global setting"
+        );
+        settings.show_overlays = true;
+        assert!(shows(&settings, "Follow.exe") && shows(&settings, "Unprofiled.exe"));
+
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "nijimi-settings-overlays-{}-{unique}.ini",
+            std::process::id()
+        ));
+        let mut settings = AppSettings {
+            show_overlays: false,
+            ..AppSettings::default()
+        };
+        for (name, effect, show_overlays) in [
+            ("Follow.exe", None, None),
+            ("Off.exe", None, Some(false)),
+            (
+                "Custom.exe",
+                Some(EffectSettings {
+                    blur: 30,
+                    ..EffectSettings::default()
+                }),
+                Some(true),
+            ),
+        ] {
+            settings.upsert(AppProfile {
+                executable: PathBuf::from(format!(r"C:\Games\{name}")),
+                aspect_ratio: AspectRatio::new(16, 9).unwrap(),
+                effect,
+                show_overlays,
+            });
+        }
+        settings.save(&path).unwrap();
+        let saved = fs::read_to_string(&path).unwrap();
+        assert!(saved.contains("@show_overlays|0\n"), "{saved}");
+        assert!(saved.contains("16:9|C:\\Games\\Follow.exe\n"), "{saved}");
+        assert!(
+            saved.contains("16:9,overlays=0|C:\\Games\\Off.exe\n"),
+            "{saved}"
+        );
+        assert!(
+            saved.contains(",overlays=1|C:\\Games\\Custom.exe\n"),
+            "{saved}"
+        );
+        assert_eq!(AppSettings::load(&path).unwrap().0, settings);
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
     fn brightness_round_trips_and_is_left_out_at_full() {
         let dimmed = EffectSettings {
             brightness: 40,
@@ -978,11 +1113,13 @@ mod tests {
             executable: PathBuf::from(r"C:\Games\Custom.exe"),
             aspect_ratio: AspectRatio::new(16, 9).unwrap(),
             effect: Some(custom),
+            show_overlays: None,
         });
         settings.upsert(AppProfile {
             executable: PathBuf::from(r"C:\Games\Global.exe"),
             aspect_ratio: AspectRatio::new(4, 3).unwrap(),
             effect: None,
+            show_overlays: None,
         });
 
         let unique = SystemTime::now()

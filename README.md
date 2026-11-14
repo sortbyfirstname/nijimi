@@ -51,7 +51,7 @@ Closing Settings leaves nijimi in the tray. Click the tray icon to reopen Settin
 
 ![nijimi's Program settings: the profile list on the left, and the selected game's aspect ratio and look on the right, with a live preview of the effect](assets/screenshots/program-settings-1.png)
 
-**Per game:** an aspect ratio (`16:9`, `21:9`, `32:9`, `16:10`, `4:3`, or any `width:height` from `1:4` to `4:1`), plus an optional look that overrides the global one.
+**Per game:** an aspect ratio (`16:9`, `21:9`, `32:9`, `16:10`, `4:3`, or any `width:height` from `1:4` to `4:1`). A game can also have its own look and its own **Show overlays** setting; otherwise it follows the global ones.
 
 **Look** (global, or per game), with a live preview sized to your monitor:
 
@@ -72,6 +72,7 @@ Closing Settings leaves nijimi in the tray. Click the tray icon to reopen Settin
 | Always on | Off | Show the effect whatever app is in front |
 | Show in screenshots | Off | Let screenshots and recordings capture the glow |
 | Hide idle cursor | On | Hide the pointer after it rests in a bar for 2 s (handy with a controller) |
+| Show overlays | On | Let notifications and overlays a game draws in its bars show through the glow ([more](#overlays-and-notifications)). Games follow this unless they have their own setting |
 | Start with Windows | Off | Start in the tray when you sign in; if you move the exe, toggle it off and on again |
 
 <details>
@@ -83,6 +84,17 @@ Closing Settings leaves nijimi in the tray. Click the tray icon to reopen Settin
 - Start with Windows uses `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`, so it needs no admin rights and shows up in Task Manager's **Startup apps**.
 
 </details>
+
+## Overlays and notifications
+
+Steam draws its notifications and overlay inside the game's own picture, so when a game fills the screen and draws its own black bars, a notification in a corner lands in a bar, under nijimi's glow. With **Show overlays** on, nijimi cuts the glow away wherever something that isn't black appears in the bars, so you see the notification as the game drew it. The glow comes back as soon as it's gone.
+
+This works for anything the game draws in its bars: Steam achievements and the Shift+Tab overlay, Discord and other in-game overlays, a software cursor, or subtitles in a film's letterbox.
+
+- Each game follows the global setting unless it has its own. It only applies while the app in front fills the whole screen. When it doesn't, the bars show the desktop or other windows, which stay under the glow.
+- It's off while **Show in screenshots** is on, because nijimi would then see its own glow in the bars.
+- Near-black bars, such as dithered or video-range black, count as black and keep their glow.
+- If a game draws artwork or a pattern in its bars, that shows through too. Turn **Show overlays** off for that game.
 
 ## Limitations
 
@@ -127,6 +139,8 @@ The game itself averaged 64% of the GPU, peaking at 95%. nijimi's CPU use rises 
 | Half | 0.164 ms | 0.49% | 0.98% |
 | Full | 0.205 ms | 0.62% | 1.2% |
 
+**Show overlays** adds two small passes while it applies: about 0.02 ms per frame at 5120×2160 with 16:9 content (0.061 → 0.082 ms at Quarter), or 0.06% of the GPU at 30 fps. In Persona 5 Royal, nijimi used 0.77% of the GPU with it on and 0.68% with it off, with no change in CPU use. With it off, or when the game doesn't fill the screen, it costs nothing.
+
 Costs scale with resolution and GPU speed. To measure your own system, see [Measuring performance](#measuring-performance).
 
 ---
@@ -144,6 +158,7 @@ nijimi is written in Rust and runs as two processes from the same exe:
 2. **Sample** the content near the picture's edges, reflected outward and downscaled to the blur resolution.
 3. **Blur** with a separable Gaussian and a wider smoothing pass, computed only in and around the bars (pixel-identical to blurring the whole screen). 10-bit and half-float intermediates prevent banding.
 4. **Composite** the result outside the game's rectangle, dithered, through a click-through DirectComposition overlay. Edge softness and edge blend fade the picture's outermost pixels into the glow, so there's no visible seam.
+5. **Let overlays through.** The overlay is excluded from capture, so the captured bars hold what the game drew there. Two small passes mark every 8×8 block of the bars that isn't near-black, then grow that mask by a block to cover movement since the captured frame. The composite fades the glow out over the mask, so the game shows through. None of this runs while it doesn't apply.
 
 **Staying light:**
 
@@ -169,7 +184,7 @@ In RustRover, the shared **Run** configuration uses `dev-release` and **Build** 
 ### Measuring performance
 
 - **GPU time per frame:** `cargo test --release bench -- --ignored --nocapture --test-threads=1`
-- **In a game:** start a release build, launch a game with a profile, then run `powershell -ExecutionPolicy Bypass -File scripts\measure-performance.ps1` and switch to the game during the countdown. It reports CPU, GPU and memory use while the overlay is active, and saves the per-second samples as CSV.
+- **In a game:** start a release build, launch a game with a profile, then run `powershell -ExecutionPolicy Bypass -File scripts\measure-performance.ps1` and switch to the game during the countdown. It reports CPU, GPU and memory use while the overlay is active, and saves the per-second samples as CSV. Add `-Seconds 20` for a shorter run. Close Settings first: an open Settings window can stop Windows from showing the game directly, which roughly triples nijimi's CPU use.
 
 ### Releasing
 

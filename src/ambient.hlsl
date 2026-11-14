@@ -2,7 +2,14 @@ Texture2D<float4> desktop : register(t0);
 Texture2D<float4> ambient : register(t1);
 Texture2D<float4> narrowAmbient : register(t2);
 Texture2D<float4> prefiltered : register(t3);
+Texture2D<float4> overlayMask : register(t4);
 SamplerState linearClamp : register(s0);
+
+// Must match `OVERLAY_BLOCK` in render.rs.
+static const int OVERLAY_BLOCK = 8;
+// Up to OVERLAY_BLACK counts as black, so dithered and 16/255 black bars keep their glow.
+static const float OVERLAY_BLACK = 0.07;
+static const float OVERLAY_VISIBLE = 0.14;
 
 cbuffer SceneInfo : register(b0)
 {
@@ -17,6 +24,7 @@ cbuffer SceneInfo : register(b0)
     float edgeInset;
     float glowDownsample;
     float barBrightness;
+    float overlayPassthrough;
 };
 
 struct VertexOutput
@@ -183,6 +191,81 @@ float4 PSBlur(VertexOutput input) : SV_TARGET
     return float4(color * alpha, alpha);
 }
 
+// Whether anything non-black is drawn in each block of the bars. The picture never counts.
+float PSOverlayMask(VertexOutput input) : SV_TARGET
+{
+    uint width, height;
+    desktop.GetDimensions(width, height);
+    float2 size = float2(width, height);
+    int2 contentMin = int2(round(contentRect.xy * size));
+    int2 contentMax = int2(round(contentRect.zw * size));
+    int2 origin = int2(input.position.xy) * OVERLAY_BLOCK;
+    if (all(origin >= contentMin) && all(origin + OVERLAY_BLOCK <= contentMax))
+        return 0.0;
+    float brightest = 0.0;
+    [unroll]
+    for (int y = 0; y < OVERLAY_BLOCK; ++y)
+    {
+        [unroll]
+        for (int x = 0; x < OVERLAY_BLOCK; ++x)
+        {
+            int2 pixel = origin + int2(x, y);
+            if (any(pixel < contentMin) || any(pixel >= contentMax))
+            {
+                float3 color = desktop.Load(int3(pixel, 0)).rgb;
+                brightest = max(brightest, max(color.r, max(color.g, color.b)));
+            }
+        }
+    }
+    return smoothstep(OVERLAY_BLACK, OVERLAY_VISIBLE, brightest);
+}
+
+// Grows the mask by a block to cover overlays that moved since the capture.
+float PSOverlayGrow(VertexOutput input) : SV_TARGET
+{
+    int2 center = int2(input.position.xy);
+    float grown = 0.0;
+    [unroll]
+    for (int y = -1; y <= 1; ++y)
+    {
+        [unroll]
+        for (int x = -1; x <= 1; ++x)
+            grown = max(grown, overlayMask.Load(int3(center + int2(x, y), 0)).r);
+    }
+    return grown;
+}
+
+// The mask only reaches a block into the picture, so the edge strip uses the bar beside it.
+float2 nearestBarPosition(float2 position)
+{
+    uint width, height;
+    desktop.GetDimensions(width, height);
+    float2 size = float2(width, height);
+    float2 low = contentRect.xy * size;
+    float2 high = contentRect.zw * size;
+    // Sides at the screen's edge have no bar.
+    float4 distance = float4(position - low, high - position)
+        + float4((float2)(low < 0.5), (float2)(high > size - 0.5)) * 1e9;
+    float nearest = min(min(distance.x, distance.y), min(distance.z, distance.w));
+    if (nearest == distance.x)
+        return float2(low.x - 0.5, position.y);
+    if (nearest == distance.y)
+        return float2(position.x, low.y - 0.5);
+    if (nearest == distance.z)
+        return float2(high.x + 0.5, position.y);
+    return float2(position.x, high.y + 0.5);
+}
+
+float overlayCoverage(float2 position, bool inside)
+{
+    if (inside)
+        position = nearestBarPosition(position);
+    uint width, height;
+    overlayMask.GetDimensions(width, height);
+    float2 uv = position / OVERLAY_BLOCK / float2(width, height);
+    return overlayMask.SampleLevel(linearClamp, uv, 0).r;
+}
+
 // Up to half a step of 8-bit noise, so smooth gradients don't band on the 8-bit swap chain.
 float dither(float2 position)
 {
@@ -275,6 +358,8 @@ float4 PSComposite(VertexOutput input) : SV_TARGET
     color.rgb *= barBrightness;
     color.rgb += dither(input.position.xy) / 255.0 * color.a;
     color.rgb = clamp(color.rgb, 0.0, color.a);
+    if (overlayPassthrough > 0.0)
+        color *= 1.0 - overlayCoverage(input.position.xy, inside);
     return color;
 }
 
