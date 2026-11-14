@@ -58,10 +58,5 @@ try {
 
 Invoke-Native 'Inno Setup' { & $iscc /Q "/DAppVersion=$version" installer/nijimi.iss }
 
-foreach ($file in Get-ChildItem dist -File) {
-    $hash = (Get-FileHash $file.FullName -Algorithm SHA256).Hash.ToLower()
-    "$hash  $($file.Name)" | Out-File -FilePath "$($file.FullName).sha256" -Encoding ascii -NoNewline
-}
-
-Get-ChildItem dist -File | Where-Object Extension -ne '.sha256' | Select-Object Name, @{ Name = 'Size (KB)'; Expression = { [math]::Round($_.Length / 1KB) } } |
+Get-ChildItem dist -File | Select-Object Name, @{ Name = 'Size (KB)'; Expression = { [math]::Round($_.Length / 1KB) } } |
     Format-Table -AutoSize
