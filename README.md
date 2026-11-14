@@ -37,7 +37,7 @@ A small Windows tray app that fills the black bars around a game with a soft, bl
 
 ## Getting started
 
-1. Download the latest `nijimi-…-windows-x64.zip` from [Releases](../../releases/latest) and extract it to a folder you can write to.
+1. Download the latest `nijimi-…-portable-x64.zip` from [Releases](../../releases/latest) and extract the `nijimi` folder somewhere you can write to.
 2. Run `nijimi.exe`. A tray icon appears and **Settings** opens.
 3. Choose **Add app…** and pick your game from recent apps, running processes, or **Browse…**.
 4. Pick its aspect ratio or resolution. Changes save automatically.
@@ -188,7 +188,7 @@ In RustRover, the shared **Run** configuration uses `dev-release` and **Build** 
 
 ### Releasing
 
-The **Build** workflow tests every push and pull request. To release, bump `version` in `Cargo.toml` and push to `main`. The workflow tags `v<version>` and publishes a zip (exe, README, license) with its SHA-256 checksum.
+The **Build** workflow tests every push and pull request. To release, bump `version` in `Cargo.toml` and push to `main`. The workflow tags `v<version>` and publishes a portable zip (a `nijimi` folder with the exe and license) with its SHA-256 checksum.
 
 ## Tested on
 
