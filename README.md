@@ -33,19 +33,34 @@ A small Windows tray app that fills the black bars around a game with a soft, bl
 - **Set it once, then forget it.** Give each game an aspect ratio or a resolution. nijimi turns on when that game is in front and off when you Alt-Tab away.
 - **Costs your games next to nothing.** Under 1% of the GPU while you play, and nothing at all when idle ([numbers](#performance)).
 - **Never touches the game.** No injection, no hooks, no driver. It's a separate click-through overlay that draws in the bars, not over the game.
-- **Portable.** One self-contained `.exe` and an INI file. No installer, no service.
+- **Light to install.** A small installer that needs no admin rights, or a portable zip with one self-contained `.exe`. No service, no runtimes.
 
 ## Getting started
 
-1. Download the latest `nijimi-…-portable-x64.zip` from [Releases](../../releases/latest) and extract the `nijimi` folder somewhere you can write to.
-2. Run `nijimi.exe`. A tray icon appears and **Settings** opens.
-3. Choose **Add app…** and pick your game from recent apps, running processes, or **Browse…**.
-4. Pick its aspect ratio or resolution. Changes save automatically.
-5. Launch the game. The glow appears as soon as the game is in front.
+1. Download the latest `nijimi-…-setup.exe` from [Releases](../../releases/latest) and run it. It installs for your user only, without asking for admin rights.
+2. Windows may say **Windows protected your PC**, because nijimi isn't code-signed. Choose **More info**, then **Run anyway**. This only happens for the setup, not when you run nijimi afterwards.
+3. Leave **Launch nijimi** ticked at the end. A tray icon appears and **Settings** opens.
+4. Choose **Add app…** and pick your game from recent apps, running processes, or **Browse…**.
+5. Pick its aspect ratio or resolution. Changes save automatically.
+6. Launch the game. The glow appears as soon as the game is in front.
 
-Closing Settings leaves nijimi in the tray. Click the tray icon to reopen Settings, or right-click it for **Exit**.
+Closing Settings leaves nijimi in the tray. Click the tray icon to reopen Settings, or right-click it for **Exit**. nijimi is also in the Start menu.
+
+**Updating:** run the newer setup. It closes nijimi if it's running and keeps your settings.
+
+**Uninstalling:** from **Settings > Apps** in Windows. This removes nijimi completely, including its settings and its Start with Windows entry.
 
 **Requirements:** Windows 10 version 2004 or later, and a Direct3D 11 GPU. No runtimes to install.
+
+<details>
+<summary>Portable version (no installer)</summary>
+
+1. Download `nijimi-…-portable-x64.zip` and drag the `nijimi` folder inside it to wherever you want nijimi to live, somewhere you can write to.
+2. Run `nijimi.exe`. Windows shows the same **Windows protected your PC** prompt the first time each new version runs.
+
+To update, drag the new `nijimi` folder over the old one. Settings stay in `nijimi.ini` beside the exe. To remove it, turn off **Start with Windows** in Settings, exit from the tray, and delete the folder.
+
+</details>
 
 ## Settings
 
@@ -78,7 +93,7 @@ Closing Settings leaves nijimi in the tray. Click the tray icon to reopen Settin
 <details>
 <summary>Where settings are stored</summary>
 
-- In `nijimi.ini` beside the executable. Copy both together to move your setup.
+- In `nijimi.ini` beside the executable. Copy both together to move your setup. The installer puts nijimi in `%LOCALAPPDATA%\Programs\nijimi`.
 - If that folder isn't writable (e.g. `Program Files`), settings go to `%APPDATA%\nijimi\nijimi.ini` instead. A file beside the exe always wins.
 - If a hand edit breaks some lines, nijimi backs up the file as `nijimi.ini.bad`, skips those lines and tells you which ones.
 - Start with Windows uses `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`, so it needs no admin rights and shows up in Task Manager's **Startup apps**.
