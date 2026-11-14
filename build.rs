@@ -2,12 +2,28 @@ fn main() {
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
         println!("cargo:rerun-if-changed=nijimi.rc");
         println!("cargo:rerun-if-changed=assets/tresbient.ico");
+        write_version_header();
         embed_resource::compile("nijimi.rc", embed_resource::NONE)
             .manifest_optional()
             .expect("failed to embed the nijimi icon resource");
         #[cfg(windows)]
         shaders::compile_all();
     }
+}
+
+/// Writes the Cargo.toml version where `nijimi.rc` can include it (embed-resource adds `OUT_DIR`
+/// to the resource compiler's include path).
+fn write_version_header() {
+    let part = |name: &str| std::env::var(format!("CARGO_PKG_VERSION_{name}")).unwrap();
+    let header = format!(
+        "#define NIJIMI_VERSION {},{},{},0\n#define NIJIMI_VERSION_STRING \"{}\"\n",
+        part("MAJOR"),
+        part("MINOR"),
+        part("PATCH"),
+        std::env::var("CARGO_PKG_VERSION").unwrap(),
+    );
+    let out_dir = std::path::PathBuf::from(std::env::var("OUT_DIR").unwrap());
+    std::fs::write(out_dir.join("version.rh"), header).expect("failed to write version.rh");
 }
 
 /// Compiles `src/ambient.hlsl` to bytecode at build time so the app never has to load the
