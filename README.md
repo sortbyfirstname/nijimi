@@ -37,7 +37,11 @@ nijimi is a small Windows tray app. It fills the black bars around a picture wit
 ## Install
 
 1. Download `nijimi-…-setup.exe` from [Releases](../../releases/latest) and run it. It installs for your user only. It does not ask for admin rights.
-2. Windows can show **Windows protected your PC**, because nijimi is not code-signed. Select **More info**, then **Run anyway**. This prompt is for the setup only.
+2. nijimi is not code-signed. Thus, you can see a warning when you download or run the setup:
+   - Your browser can show a warning because few people download the file. In Edge, select **…** > **Keep**, then **Show more** > **Keep anyway**. Other browsers have a similar **Keep** option.
+   - Windows can show **Windows protected your PC**. Select **More info**, then **Run anyway**.
+
+   These warnings are for the setup only.
 3. Keep **Launch nijimi** selected at the end. The tray icon appears and **Settings** opens.
 4. Select **Add app**. Pick your game from the recent or running apps, or select **Browse…**.
 5. Set its aspect ratio or resolution. nijimi saves changes immediately.
@@ -56,7 +60,7 @@ Requirements: Windows 10 version 2004 or later, and a Direct3D 11 GPU.
 
 1. Download `nijimi-…-portable-x64.zip`.
 2. Move the `nijimi` folder from the zip to a folder you can write to.
-3. Run `nijimi.exe`. Windows shows the **Windows protected your PC** prompt once for each new version.
+3. Run `nijimi.exe`. Windows shows the **Windows protected your PC** prompt once for each new version. Select **More info**, then **Run anyway**.
 
 To update, copy the new `nijimi` folder over the old one. Your settings are in `nijimi.ini`, beside the exe.
 
@@ -66,7 +70,7 @@ To remove nijimi, turn off **Start with Windows**, exit from the tray, and delet
 
 ## Settings
 
-![nijimi's Program settings: the profile list on the left, and the selected game's aspect ratio and look on the right, with a live preview of the effect](assets/screenshots/program-settings-1.png)
+<img src="assets/screenshots/settings.png" alt="nijimi's Program settings: the profile list on the left, and the selected game's aspect ratio and look on the right, with a live preview of the effect" height="720">
 
 Each app profile has a content area. This is the part of the screen where the picture shows. It can be:
 
