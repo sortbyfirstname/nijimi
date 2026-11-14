@@ -726,11 +726,11 @@ fn apply_foreground(state: &mut AppState) -> Option<String> {
     state.renderer.set_show_overlays(selected.show_overlays);
     if let Err(error) = state
         .renderer
-        .configure(selected.aspect_ratio, selected.effect)
+        .configure(selected.content_area, selected.effect)
     {
         stop_after_error(state);
         return Some(format!(
-            "nijimi could not apply the selected aspect ratio:\n{error}"
+            "nijimi could not apply the selected content area:\n{error}"
         ));
     }
     state.renderer.set_enabled(true);

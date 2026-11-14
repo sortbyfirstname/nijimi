@@ -44,7 +44,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
 use windows::core::{Error, HRESULT, Interface, Result, w};
 
 use crate::geometry::{
-    AspectRatio, ScreenRect, ambient_regions, content_bounds, fit_content, inset_bar_edges,
+    ContentArea, ScreenRect, ambient_regions, content_bounds, fit_content, inset_bar_edges,
+    place_content,
 };
 use crate::settings::EffectSettings;
 use idle_cursor::IdleCursor;
@@ -73,7 +74,7 @@ pub struct Renderer {
     width: u32,
     height: u32,
     enabled: bool,
-    aspect_ratio: AspectRatio,
+    content_area: ContentArea,
     effect: EffectSettings,
     capturable: bool,
     show_overlays: bool,
@@ -173,13 +174,13 @@ impl SceneGeometry {
     fn new(
         width: u32,
         height: u32,
-        aspect_ratio: AspectRatio,
+        content_area: ContentArea,
         effect: EffectSettings,
     ) -> Option<Self> {
         Self::with_blur_scale(
             width,
             height,
-            aspect_ratio,
+            content_area,
             effect,
             BlurScale::new(effect.resolution.scale()),
         )
@@ -188,11 +189,26 @@ impl SceneGeometry {
     fn with_blur_scale(
         width: u32,
         height: u32,
-        aspect_ratio: AspectRatio,
+        content_area: ContentArea,
         effect: EffectSettings,
         blur_scale: BlurScale,
     ) -> Option<Self> {
-        let rect = fit_content(width, height, aspect_ratio)?;
+        Self::around(
+            width,
+            height,
+            fit_content(width, height, content_area)?,
+            effect,
+            blur_scale,
+        )
+    }
+
+    fn around(
+        width: u32,
+        height: u32,
+        rect: ScreenRect,
+        effect: EffectSettings,
+        blur_scale: BlurScale,
+    ) -> Option<Self> {
         let shorter_side = width.min(height) as f32;
         let strength = |value: u8| value as f32 / EffectSettings::MAX_STRENGTH as f32;
         let mut edge_inset =
@@ -536,14 +552,14 @@ impl Drop for OverlayWindow {
 impl Renderer {
     pub fn new() -> Result<Self> {
         Self::with_options(
-            AspectRatio::new(16, 9).unwrap(),
+            ContentArea::ratio(16, 9).unwrap(),
             EffectSettings::default(),
             false,
         )
     }
 
     fn with_options(
-        aspect_ratio: AspectRatio,
+        content_area: ContentArea,
         effect: EffectSettings,
         capturable: bool,
     ) -> Result<Self> {
@@ -557,7 +573,7 @@ impl Renderer {
             if width == 0 || height == 0 {
                 return Err(Error::from_win32());
             }
-            let scene = SceneGeometry::new(width, height, aspect_ratio, effect)
+            let scene = SceneGeometry::new(width, height, content_area, effect)
                 .ok_or_else(Error::from_win32)?;
 
             let instance = windows::Win32::Foundation::HINSTANCE(GetModuleHandleW(None)?.0);
@@ -612,7 +628,7 @@ impl Renderer {
                 width,
                 height,
                 enabled: false,
-                aspect_ratio,
+                content_area,
                 effect,
                 capturable,
                 show_overlays: false,
@@ -658,10 +674,43 @@ impl Renderer {
         }
     }
 
-    pub fn configure(&mut self, aspect_ratio: AspectRatio, effect: EffectSettings) -> Result<()> {
-        self.scene = SceneGeometry::new(self.width, self.height, aspect_ratio, effect)
+    /// Windowed games often centre the whole window, title bar included, so an exact size
+    /// follows the foreground window's client area when it is that size.
+    fn follow_window(&mut self) {
+        if !matches!(self.content_area, ContentArea::Size { .. }) {
+            return;
+        }
+        let rect = place_content(
+            self.width,
+            self.height,
+            self.content_area,
+            foreground_client_rect(),
+        );
+        if rect.is_none_or(|rect| rect == self.scene.content) {
+            return;
+        }
+        let Some(mut scene) = rect.and_then(|rect| {
+            SceneGeometry::around(
+                self.width,
+                self.height,
+                rect,
+                self.effect,
+                self.scene.blur_scale,
+            )
+        }) else {
+            return;
+        };
+        scene.constants.overlay_passthrough = self.scene.constants.overlay_passthrough;
+        self.scene = scene;
+        if let Some(gpu) = self.gpu.as_mut() {
+            gpu.up_to_date = false;
+        }
+    }
+
+    pub fn configure(&mut self, content_area: ContentArea, effect: EffectSettings) -> Result<()> {
+        self.scene = SceneGeometry::new(self.width, self.height, content_area, effect)
             .ok_or_else(Error::from_win32)?;
-        self.aspect_ratio = aspect_ratio;
+        self.content_area = content_area;
         self.effect = effect;
         if let Some(gpu) = self.gpu.as_mut() {
             gpu.up_to_date = false;
@@ -748,7 +797,7 @@ impl Renderer {
 
     pub fn refresh(&mut self, enabled: bool) -> Result<()> {
         self.set_enabled(false);
-        let mut replacement = Self::with_options(self.aspect_ratio, self.effect, self.capturable)?;
+        let mut replacement = Self::with_options(self.content_area, self.effect, self.capturable)?;
         replacement.set_hide_idle_cursor(self.idle_cursor.is_some());
         replacement.set_show_overlays(self.show_overlays);
         replacement.set_enabled(enabled);
@@ -786,6 +835,7 @@ impl Renderer {
                 return Ok(());
             }
         }
+        self.follow_window();
         self.update_overlay_passthrough();
         let gpu = self.gpu.as_mut().unwrap();
         let capture = match gpu.render(&self.scene) {
@@ -835,24 +885,36 @@ impl Renderer {
     }
 }
 
-fn foreground_fills_screen(width: u32, height: u32) -> bool {
+/// The foreground window minus its title bar and borders, in screen pixels.
+fn foreground_client_rect() -> Option<ScreenRect> {
     unsafe {
         let foreground = GetForegroundWindow();
         if foreground.0.is_null() {
-            return false;
+            return None;
         }
         let mut client = RECT::default();
         let mut origin = POINT::default();
         if GetClientRect(foreground, &mut client).is_err()
             || !ClientToScreen(foreground, &mut origin).as_bool()
         {
-            return false;
+            return None;
         }
-        origin.x <= 0
-            && origin.y <= 0
-            && origin.x + client.right >= width as i32
-            && origin.y + client.bottom >= height as i32
+        Some(ScreenRect {
+            left: origin.x,
+            top: origin.y,
+            right: origin.x + client.right,
+            bottom: origin.y + client.bottom,
+        })
     }
+}
+
+fn foreground_fills_screen(width: u32, height: u32) -> bool {
+    foreground_client_rect().is_some_and(|client| {
+        client.left <= 0
+            && client.top <= 0
+            && client.right >= width as i32
+            && client.bottom >= height as i32
+    })
 }
 
 /// Whether the frame changed anything inside `area`; the overlay never draws there, so its own
@@ -1736,7 +1798,7 @@ mod tests {
         shaders: &AmbientShaders,
         (width, height): (u32, u32),
         pixels: &[u8],
-        aspect_ratio: AspectRatio,
+        content_area: ContentArea,
         effect: EffectSettings,
         blur_scale: BlurScale,
     ) -> Vec<u8> {
@@ -1786,7 +1848,7 @@ mod tests {
                 .CreateRenderTargetView(&output, None, Some(&mut render_target))
                 .unwrap();
             let scene =
-                SceneGeometry::with_blur_scale(width, height, aspect_ratio, effect, blur_scale)
+                SceneGeometry::with_blur_scale(width, height, content_area, effect, blur_scale)
                     .unwrap();
             let blur = BlurTargets::new(device, width, height, scene.blur_scale).unwrap();
             let scene_buffer = create_scene_buffer(device).unwrap();
@@ -1841,8 +1903,11 @@ mod tests {
         // Uneven sizes catch rounding at the scissor edges and in odd mip sizes.
         for screen in [(480, 200), (333, 251)] {
             let picture = noise_picture(screen.0, screen.1);
-            for (width, height) in [(16, 9), (4, 3), (32, 9), (1, 1)] {
-                let aspect_ratio = AspectRatio::new(width, height).unwrap();
+            for content_area in [(16, 9), (4, 3), (32, 9), (1, 1)]
+                .map(|(width, height)| ContentArea::ratio(width, height).unwrap())
+                .into_iter()
+                .chain([ContentArea::size(301, 151).unwrap()])
+            {
                 for (softness, blend, blur) in [(50, 60, 80), (100, 100, 100), (0, 0, 100)] {
                     for resolution in crate::settings::BlurResolution::ALL {
                         let effect = EffectSettings {
@@ -1860,7 +1925,7 @@ mod tests {
                                 &shaders,
                                 screen,
                                 &picture,
-                                aspect_ratio,
+                                content_area,
                                 effect,
                                 BlurScale::new(resolution.scale()),
                             )
@@ -1869,7 +1934,7 @@ mod tests {
                         let bars = render(false);
                         assert!(
                             everywhere == bars,
-                            "{screen:?} {width}:{height} {effect:?} differs when the glow is limited to the bars"
+                            "{screen:?} {content_area} {effect:?} differs when the glow is limited to the bars"
                         );
                     }
                 }
@@ -1911,7 +1976,7 @@ mod tests {
                         &shaders,
                         screen,
                         &picture,
-                        AspectRatio::new(16, 9).unwrap(),
+                        ContentArea::ratio(16, 9).unwrap(),
                         effect,
                         BlurScale { prefilter: 1, glow },
                     )
@@ -2424,7 +2489,7 @@ mod tests {
 
     #[test]
     fn effect_strengths_scale_with_the_screen_and_resolution() {
-        let ratio = AspectRatio::new(16, 9).unwrap();
+        let ratio = ContentArea::ratio(16, 9).unwrap();
         let effect = |edge_softness, edge_blend, blur, resolution| EffectSettings {
             edge_softness,
             edge_blend,

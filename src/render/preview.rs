@@ -117,17 +117,24 @@ impl Preview {
         &mut self,
         screen_width: u32,
         screen_height: u32,
-        aspect_ratio: AspectRatio,
+        content_area: ContentArea,
         effect: EffectSettings,
     ) -> Result<PreviewImage> {
         let width = (screen_width / SHRINK).max(1);
         let height = (screen_height / SHRINK).max(1);
+        let content_area = match content_area {
+            ContentArea::Size { width, height } => ContentArea::Size {
+                width: (width / SHRINK).max(1),
+                height: (height / SHRINK).max(1),
+            },
+            ratio => ratio,
+        };
         let screen_scale = BlurScale::new(effect.resolution.scale());
         let blur_scale = BlurScale {
             prefilter: (screen_scale.prefilter / SHRINK).max(1),
             glow: (screen_scale.glow / SHRINK).max(1),
         };
-        let scene = SceneGeometry::with_blur_scale(width, height, aspect_ratio, effect, blur_scale)
+        let scene = SceneGeometry::with_blur_scale(width, height, content_area, effect, blur_scale)
             .ok_or_else(Error::from_win32)?;
         if self
             .targets
@@ -338,7 +345,7 @@ mod tests {
             ..EffectSettings::default()
         };
         let image = preview
-            .render(3440, 1440, AspectRatio::new(16, 9).unwrap(), effect)
+            .render(3440, 1440, ContentArea::ratio(16, 9).unwrap(), effect)
             .unwrap();
         assert_eq!((image.width, image.height), (860, 360));
         let pixel = |x: u32, y: u32| {

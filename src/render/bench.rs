@@ -122,11 +122,11 @@ fn gpu_ms(
     context: &ID3D11DeviceContext,
     shaders: &AmbientShaders,
     screen: &Screen,
-    aspect_ratio: AspectRatio,
+    content_area: ContentArea,
     effect: EffectSettings,
     overlays: bool,
 ) -> (f64, f64) {
-    let mut scene = SceneGeometry::new(screen.width, screen.height, aspect_ratio, effect).unwrap();
+    let mut scene = SceneGeometry::new(screen.width, screen.height, content_area, effect).unwrap();
     if overlays {
         scene.constants.overlay_passthrough = 1.0;
     }
@@ -214,7 +214,7 @@ fn bench_gpu_cost_per_frame() {
     for (width, height) in [(5120, 2160), (3840, 2160), (2560, 1440)] {
         let screen = screen(&device, width, height);
         for (ratio_width, ratio_height) in [(16, 9), (4, 3)] {
-            let aspect_ratio = AspectRatio::new(ratio_width, ratio_height).unwrap();
+            let content_area = ContentArea::ratio(ratio_width, ratio_height).unwrap();
             for (name, look, overlays) in looks {
                 for resolution in BlurResolution::ALL {
                     let effect = EffectSettings { resolution, ..look };
@@ -223,7 +223,7 @@ fn bench_gpu_cost_per_frame() {
                         &context,
                         &shaders,
                         &screen,
-                        aspect_ratio,
+                        content_area,
                         effect,
                         overlays,
                     );

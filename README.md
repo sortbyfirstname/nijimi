@@ -30,7 +30,7 @@ A small Windows tray app that fills the black bars around a game with a soft, bl
 
 - **Kinder to OLED screens.** Black bars leave their pixels unlit while the rest of the panel ages, so over time the bars can end up brighter than everything else (reverse burn-in). Lighting them with the game's own colours helps the whole screen wear more evenly.
 - **Ultrawide, but the game isn't?** Play 16:9 games on a 21:9 or 32:9 monitor, or 4:3 classics on a 16:9 one, without big dead slabs of black either side.
-- **Set it once, then forget it.** Give each game an aspect ratio. nijimi turns on when that game is in front and off when you Alt-Tab away.
+- **Set it once, then forget it.** Give each game an aspect ratio or a resolution. nijimi turns on when that game is in front and off when you Alt-Tab away.
 - **Costs your games next to nothing.** Under 1% of the GPU while you play, and nothing at all when idle ([numbers](#performance)).
 - **Never touches the game.** No injection, no hooks, no driver. It's a separate click-through overlay that draws in the bars, not over the game.
 - **Portable.** One self-contained `.exe` and an INI file. No installer, no service.
@@ -40,7 +40,7 @@ A small Windows tray app that fills the black bars around a game with a soft, bl
 1. Download the latest `nijimi-…-windows-x64.zip` from [Releases](../../releases/latest) and extract it to a folder you can write to.
 2. Run `nijimi.exe`. A tray icon appears and **Settings** opens.
 3. Choose **Add app…** and pick your game from recent apps, running processes, or **Browse…**.
-4. Pick its aspect ratio. Changes save automatically.
+4. Pick its aspect ratio or resolution. Changes save automatically.
 5. Launch the game. The glow appears as soon as the game is in front.
 
 Closing Settings leaves nijimi in the tray. Click the tray icon to reopen Settings, or right-click it for **Exit**.
@@ -51,7 +51,7 @@ Closing Settings leaves nijimi in the tray. Click the tray icon to reopen Settin
 
 ![nijimi's Program settings: the profile list on the left, and the selected game's aspect ratio and look on the right, with a live preview of the effect](assets/screenshots/program-settings-1.png)
 
-**Per game:** an aspect ratio (`16:9`, `21:9`, `32:9`, `16:10`, `4:3`, or any `width:height` from `1:4` to `4:1`). A game can also have its own look and its own **Show overlays** setting; otherwise it follows the global ones.
+**Per game:** an aspect ratio (`16:9`, `21:9`, `32:9`, `16:10`, `4:3`, or any `width:height` from `1:4` to `4:1`), or an exact resolution like `1920x1080`. A ratio fills the screen's height or width; a resolution sits on the game's window when it is that size (centred otherwise), with bars on every side if it is smaller than the screen, which helps when running a game below native resolution to keep the frame rate up. A game can also have its own look and its own **Show overlays** setting; otherwise it follows the global ones.
 
 **Look** (global, or per game), with a live preview sized to your monitor:
 
@@ -67,7 +67,7 @@ Closing Settings leaves nijimi in the tray. Click the tray icon to reopen Settin
 
 | Setting | Default | What it does |
 |---|---|---|
-| Default aspect ratio | `21:9` | Used for new profiles, and for apps without a profile when Always on is set |
+| Default content area | `21:9` | Used for new profiles, and for apps without a profile when Always on is set |
 | Frame rate | 30 fps | Update the glow 30 or 60 times a second |
 | Always on | Off | Show the effect whatever app is in front |
 | Show in screenshots | Off | Let screenshots and recordings capture the glow |
@@ -99,7 +99,7 @@ This works for anything the game draws in its bars: Steam achievements and the S
 ## Limitations
 
 - **Primary display only.**
-- **Fixed ratio per game.** nijimi centres the ratio you set on the screen. It doesn't detect the game's actual resolution or window.
+- **Fixed content area per game.** nijimi centres the ratio you set on the screen. A resolution follows the game's window (minus its title bar) when the window is exactly that size, and is centred otherwise. nijimi never looks at the picture to find the game.
 - **Some content can't be captured,** such as protected video and some exclusive-fullscreen modes.
 - **Older GPUs: latency and VRR.** Modern GPUs keep showing the game directly with nijimi on top, using multiplane overlays (MPO). Tested on an RTX 5090, it added no latency. On GPUs or drivers without MPO, Windows has to compose the game with the overlay instead, which can add up to a frame of latency and affect G-Sync/FreeSync. If that matters for a game, remove its profile.
 - **HDR.** The glow is drawn as SDR, at Windows' **SDR content brightness**. HDR highlights are clipped before the blur, which is hard to notice in a soft glow.

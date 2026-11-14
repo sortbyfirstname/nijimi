@@ -207,7 +207,7 @@ mod tests {
         let mut settings = AppSettings::default();
         settings.upsert(crate::settings::AppProfile {
             executable: r"C:\Users\someone\Games\Secret.exe".into(),
-            aspect_ratio: crate::geometry::AspectRatio::new(16, 9).unwrap(),
+            content_area: crate::geometry::ContentArea::ratio(16, 9).unwrap(),
             effect: None,
             show_overlays: None,
         });

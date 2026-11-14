@@ -24,7 +24,7 @@ use windows::Win32::System::Threading::{CreateMutexW, ReleaseMutex};
 use windows::Win32::UI::WindowsAndMessaging::SetForegroundWindow;
 use windows::core::w;
 
-use crate::geometry::AspectRatio;
+use crate::geometry::ContentArea;
 use crate::render::{Preview, PreviewImage, primary_screen_size};
 use crate::settings::{
     self, AppProfile, AppSettings, BlurResolution, EffectSettings, FrameRate, paths_match,
@@ -134,15 +134,15 @@ fn updated_settings(
     selected_profile: Option<&Path>,
     value: &str,
 ) -> Option<AppSettings> {
-    let ratio = AspectRatio::parse(value)?;
+    let ratio = ContentArea::parse(value)?;
     let mut updated = settings.clone();
     match page {
-        SettingsPage::Global => updated.default_aspect_ratio = ratio,
+        SettingsPage::Global => updated.default_content_area = ratio,
         SettingsPage::Program => {
             let executable = selected_profile?;
             updated.upsert(AppProfile {
                 executable: executable.to_path_buf(),
-                aspect_ratio: ratio,
+                content_area: ratio,
                 effect: settings
                     .profile_for(executable)
                     .and_then(|profile| profile.effect),
@@ -219,14 +219,14 @@ struct PreviewState {
     screen_size: Option<(u32, u32)>,
     image: Option<Arc<RenderImage>>,
     error: Option<String>,
-    rendered: Option<(AspectRatio, EffectSettings)>,
+    rendered: Option<(ContentArea, EffectSettings)>,
     busy: bool,
 }
 
 fn render_preview(
     renderer: &Mutex<Option<Preview>>,
     (screen_width, screen_height): (u32, u32),
-    (aspect_ratio, effect): (AspectRatio, EffectSettings),
+    (content_area, effect): (ContentArea, EffectSettings),
 ) -> Result<Arc<RenderImage>, String> {
     let mut renderer = renderer.lock().map_err(|error| error.to_string())?;
     if renderer.is_none() {
@@ -239,7 +239,7 @@ fn render_preview(
     } = renderer
         .as_mut()
         .unwrap()
-        .render(screen_width, screen_height, aspect_ratio, effect)
+        .render(screen_width, screen_height, content_area, effect)
         .map_err(|error| error.to_string())?;
     // GPUI's images hold BGRA bytes in an RGBA-typed buffer.
     let buffer = image::RgbaImage::from_raw(width, height, bgra)
@@ -284,13 +284,11 @@ impl SettingsView {
             .next();
         let initial_ratio = selected_profile
             .as_deref()
-            .and_then(|path| data.settings.ratio_for(path))
-            .unwrap_or(data.settings.default_aspect_ratio);
+            .and_then(|path| data.settings.content_area_for(path))
+            .unwrap_or(data.settings.default_content_area);
         let search = cx.new(|cx| InputState::new(window, cx).placeholder("Search apps or paths"));
-        let ratio = cx.new(|cx| {
-            InputState::new(window, cx)
-                .default_value(format!("{}:{}", initial_ratio.width, initial_ratio.height))
-        });
+        let ratio =
+            cx.new(|cx| InputState::new(window, cx).default_value(initial_ratio.to_string()));
         let initial_effect = effect_on_page(
             &data.settings,
             SettingsPage::Program,
@@ -378,13 +376,13 @@ impl SettingsView {
         self.suppress_ratio_events = false;
     }
 
-    fn current_ratio(&self) -> Option<AspectRatio> {
+    fn current_ratio(&self) -> Option<ContentArea> {
         match self.page {
-            SettingsPage::Global => Some(self.settings.default_aspect_ratio),
+            SettingsPage::Global => Some(self.settings.default_content_area),
             SettingsPage::Program => self
                 .selected_profile
                 .as_deref()
-                .and_then(|path| self.settings.ratio_for(path)),
+                .and_then(|path| self.settings.content_area_for(path)),
             SettingsPage::Add | SettingsPage::About => None,
         }
     }
@@ -392,7 +390,7 @@ impl SettingsView {
     fn sync_ratio_text(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let value = self
             .current_ratio()
-            .map(|ratio| format!("{}:{}", ratio.width, ratio.height))
+            .map(|area| area.to_string())
             .unwrap_or_default();
         self.set_ratio_text(&value, window, cx);
         self.sync_effect_sliders(window, cx);
@@ -403,8 +401,8 @@ impl SettingsView {
     }
 
     /// What the preview should show: the page's look, with sliders mid-drag taking effect live.
-    fn preview_target(&self, cx: &App) -> Option<(AspectRatio, EffectSettings)> {
-        let aspect_ratio = self.current_ratio()?;
+    fn preview_target(&self, cx: &App) -> Option<(ContentArea, EffectSettings)> {
+        let content_area = self.current_ratio()?;
         let mut effect = self.current_effect();
         if self.effect_editable() {
             effect.edge_softness = slider_strength(self.edge_softness.read(cx));
@@ -412,7 +410,7 @@ impl SettingsView {
             effect.blur = slider_strength(self.blur.read(cx));
             effect.brightness = slider_strength(self.brightness.read(cx));
         }
-        Some((aspect_ratio, effect))
+        Some((content_area, effect))
     }
 
     /// One render at a time; when it finishes, the next view render catches up with any changes.
@@ -619,7 +617,7 @@ impl SettingsView {
     }
 
     fn restore_ratio(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if AspectRatio::parse(&self.ratio.read(cx).value()).is_none() {
+        if ContentArea::parse(&self.ratio.read(cx).value()).is_none() {
             self.sync_ratio_text(window, cx);
         }
     }
@@ -743,14 +741,14 @@ impl SettingsView {
             cx.notify();
             return;
         };
-        if self.settings.ratio_for(&executable).is_some() {
+        if self.settings.content_area_for(&executable).is_some() {
             self.select_profile(executable, window, cx);
             return;
         }
         let mut updated = self.settings.clone();
         updated.upsert(AppProfile {
             executable: executable.clone(),
-            aspect_ratio: self.settings.default_aspect_ratio,
+            content_area: self.settings.default_content_area,
             effect: None,
             show_overlays: None,
         });
@@ -1110,7 +1108,7 @@ impl SettingsView {
         let Some(path) = self
             .selected_profile
             .as_deref()
-            .filter(|path| self.settings.ratio_for(path).is_some())
+            .filter(|path| self.settings.content_area_for(path).is_some())
         else {
             return div()
                 .flex()
@@ -1138,9 +1136,9 @@ impl SettingsView {
                     .child(div().text_xl().text_color(rgb(0xf0f0f0)).child(name))
                     .child(div().text_sm().text_color(rgb(0xb0b0b0)).child(full_path)),
             )
-            .child(self.render_ratio_card("Content aspect ratio", cx))
+            .child(self.render_ratio_card("Content area", cx))
             .child(div().text_sm().text_color(rgb(0xb0b0b0)).child(
-                "The selected content area stays clear; ambient blur fills the space outside it.",
+                "Where the game, film or other content is visible. It stays clear; the glow fills the space around it.",
             ))
             .child(self.render_effect_card(cx))
             .child(self.render_overlays_card(cx))
@@ -1179,9 +1177,9 @@ impl SettingsView {
                             .child("Set the starting content area used for new app profiles."),
                     ),
             )
-            .child(self.render_ratio_card("Default content aspect ratio", cx))
+            .child(self.render_ratio_card("Default content area", cx))
             .child(div().text_sm().text_color(rgb(0xb0b0b0)).child(
-                "New profiles start with this ratio. Existing app settings are not changed.",
+                "New profiles start with this content area. Existing app settings are not changed.",
             ))
             .child(self.render_effect_card(cx))
             .child(self.render_overlays_card(cx))
@@ -1213,7 +1211,7 @@ impl SettingsView {
             .child(
                 toggle_card(
                     "Always on",
-                    "Show the effect over every app, not just profiled games. Apps without a profile use the default ratio.",
+                    "Show the effect over every app, not just profiled games. Apps without a profile use the default content area.",
                 )
                 .child(
                     Switch::new("always-on")
@@ -1495,9 +1493,8 @@ impl SettingsView {
                     .flex_col()
                     .gap_3()
                     .child(div().text_sm().text_color(rgb(0xb0b0b0)).child(format!(
-                        "New profiles use the global default: {}:{}",
-                        self.settings.default_aspect_ratio.width,
-                        self.settings.default_aspect_ratio.height
+                        "New profiles use the global default: {}",
+                        self.settings.default_content_area
                     )))
                     .child(
                         Button::new("confirm-add-app")
@@ -1752,7 +1749,7 @@ impl SettingsView {
                                 div()
                                     .text_xs()
                                     .text_color(rgb(0xa6a6a6))
-                                    .child("Use width:height, from 1:4 through 4:1"),
+                                    .child("A ratio like 16:9, or an exact size like 1920x1080"),
                             ),
                     )
                     .child(
@@ -1922,7 +1919,7 @@ mod tests {
         let mut settings = AppSettings::default();
         settings.upsert(AppProfile {
             executable: executable.clone(),
-            aspect_ratio: AspectRatio::new(16, 9).unwrap(),
+            content_area: ContentArea::ratio(16, 9).unwrap(),
             effect: None,
             show_overlays: None,
         });
@@ -1930,8 +1927,11 @@ mod tests {
         let updated =
             updated_settings(&settings, SettingsPage::Program, Some(&executable), "32:9").unwrap();
 
-        assert_eq!(updated.default_aspect_ratio, settings.default_aspect_ratio);
-        assert_eq!(updated.ratio_for(&executable), AspectRatio::new(32, 9));
+        assert_eq!(updated.default_content_area, settings.default_content_area);
+        assert_eq!(
+            updated.content_area_for(&executable),
+            ContentArea::ratio(32, 9)
+        );
     }
 
     #[test]
@@ -1940,7 +1940,7 @@ mod tests {
         let mut settings = AppSettings::default();
         settings.upsert(AppProfile {
             executable: executable.clone(),
-            aspect_ratio: AspectRatio::new(16, 9).unwrap(),
+            content_area: ContentArea::ratio(16, 9).unwrap(),
             effect: None,
             show_overlays: None,
         });
@@ -1948,10 +1948,13 @@ mod tests {
         let updated = updated_settings(&settings, SettingsPage::Global, None, "16:10").unwrap();
 
         assert_eq!(
-            updated.default_aspect_ratio,
-            AspectRatio::new(16, 10).unwrap()
+            updated.default_content_area,
+            ContentArea::ratio(16, 10).unwrap()
         );
-        assert_eq!(updated.ratio_for(&executable), AspectRatio::new(16, 9));
+        assert_eq!(
+            updated.content_area_for(&executable),
+            ContentArea::ratio(16, 9)
+        );
     }
 
     #[test]
@@ -1973,7 +1976,7 @@ mod tests {
         let mut settings = AppSettings::default();
         settings.upsert(AppProfile {
             executable: executable.clone(),
-            aspect_ratio: AspectRatio::new(16, 9).unwrap(),
+            content_area: ContentArea::ratio(16, 9).unwrap(),
             effect: Some(custom),
             show_overlays: None,
         });
@@ -1999,7 +2002,7 @@ mod tests {
         };
         settings.upsert(AppProfile {
             executable: executable.clone(),
-            aspect_ratio: AspectRatio::new(16, 9).unwrap(),
+            content_area: ContentArea::ratio(16, 9).unwrap(),
             effect: Some(EffectSettings {
                 blur: 90,
                 ..EffectSettings::default()
@@ -2026,7 +2029,7 @@ mod tests {
         let mut settings = AppSettings::default();
         settings.upsert(AppProfile {
             executable: executable.clone(),
-            aspect_ratio: AspectRatio::new(16, 9).unwrap(),
+            content_area: ContentArea::ratio(16, 9).unwrap(),
             effect: None,
             show_overlays: None,
         });

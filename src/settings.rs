@@ -3,7 +3,7 @@ use std::fs;
 use std::io::{Error, ErrorKind, Result};
 use std::path::{Path, PathBuf};
 
-use crate::geometry::AspectRatio;
+use crate::geometry::ContentArea;
 
 const CONFIG_FILE_NAME: &str = "nijimi.ini";
 const APP_DIR_NAME: &str = "nijimi";
@@ -159,7 +159,7 @@ fn parse_strength(value: &str) -> Option<u8> {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AppProfile {
     pub executable: PathBuf,
-    pub aspect_ratio: AspectRatio,
+    pub content_area: ContentArea,
     /// `None` follows the global effect settings.
     pub effect: Option<EffectSettings>,
     /// `None` follows the global setting.
@@ -174,7 +174,7 @@ impl AppProfile {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AppSettings {
-    pub default_aspect_ratio: AspectRatio,
+    pub default_content_area: ContentArea,
     pub default_effect: EffectSettings,
     pub always_on: bool,
     pub show_in_screenshots: bool,
@@ -187,7 +187,7 @@ pub struct AppSettings {
 impl Default for AppSettings {
     fn default() -> Self {
         Self {
-            default_aspect_ratio: AspectRatio::new(21, 9).unwrap(),
+            default_content_area: ContentArea::ratio(21, 9).unwrap(),
             default_effect: EffectSettings::default(),
             always_on: false,
             show_in_screenshots: false,
@@ -203,16 +203,9 @@ impl Default for AppSettings {
 pub struct ActiveProfile {
     /// `None` when shown only because of "Always on".
     pub executable: Option<PathBuf>,
-    pub aspect_ratio: AspectRatio,
+    pub content_area: ContentArea,
     pub effect: EffectSettings,
     pub show_overlays: bool,
-}
-
-impl AspectRatio {
-    pub fn parse(value: &str) -> Option<Self> {
-        let (width, height) = value.trim().split_once(':')?;
-        Self::new(width.trim().parse().ok()?, height.trim().parse().ok()?)
-    }
 }
 
 impl AppSettings {
@@ -261,7 +254,7 @@ impl AppSettings {
     fn parse_line(&mut self, line: &str) -> Option<()> {
         let (ratio, executable) = line.split_once('|')?;
         match ratio {
-            "@global" => self.default_aspect_ratio = AspectRatio::parse(executable)?,
+            "@global" => self.default_content_area = ContentArea::parse(executable)?,
             "@effect" => self.default_effect = EffectSettings::parse(executable)?,
             "@frame_rate" => self.frame_rate = FrameRate::from_key(executable.trim())?,
             "@always_on" => self.always_on = parse_flag(executable)?,
@@ -285,14 +278,14 @@ impl AppSettings {
                 } else {
                     Some(EffectSettings::parse(&effect_pairs.join(","))?)
                 };
-                let aspect_ratio = AspectRatio::parse(ratio)?;
+                let content_area = ContentArea::parse(ratio)?;
                 let executable = executable.trim();
                 if executable.is_empty() {
                     return None;
                 }
                 self.upsert(AppProfile {
                     executable: PathBuf::from(executable),
-                    aspect_ratio,
+                    content_area,
                     effect,
                     show_overlays,
                 });
@@ -304,8 +297,9 @@ impl AppSettings {
     pub fn save(&self, path: &Path) -> Result<()> {
         let mut contents = String::new();
         contents.push_str(&format!(
-            "@global|{}:{}\n",
-            self.default_aspect_ratio.width, self.default_aspect_ratio.height
+            "@global|{}
+",
+            self.default_content_area
         ));
         // Omitted when unchanged so older builds, which reject unknown lines, can still load the file.
         if self.default_effect != EffectSettings::default() {
@@ -348,8 +342,9 @@ impl AppSettings {
                 options.push_str(if show { ",overlays=1" } else { ",overlays=0" });
             }
             contents.push_str(&format!(
-                "{}:{}{options}|{executable}\n",
-                profile.aspect_ratio.width, profile.aspect_ratio.height
+                "{}{options}|{executable}
+",
+                profile.content_area
             ));
         }
 
@@ -387,9 +382,9 @@ impl AppSettings {
             .find(|profile| paths_match(&profile.executable, executable))
     }
 
-    pub fn ratio_for(&self, executable: &Path) -> Option<AspectRatio> {
+    pub fn content_area_for(&self, executable: &Path) -> Option<ContentArea> {
         self.profile_for(executable)
-            .map(|profile| profile.aspect_ratio)
+            .map(|profile| profile.content_area)
     }
 
     pub fn active_profile(
@@ -406,7 +401,7 @@ impl AppSettings {
             .and_then(|executable| {
                 self.profile_for(executable).map(|profile| ActiveProfile {
                     executable: Some(executable.to_path_buf()),
-                    aspect_ratio: profile.aspect_ratio,
+                    content_area: profile.content_area,
                     effect: profile.effect.unwrap_or(self.default_effect),
                     show_overlays: profile.shows_overlays(self),
                 })
@@ -414,7 +409,7 @@ impl AppSettings {
         if profile.is_none() && self.always_on {
             return Some(ActiveProfile {
                 executable: None,
-                aspect_ratio: self.default_aspect_ratio,
+                content_area: self.default_content_area,
                 effect: self.default_effect,
                 show_overlays: self.show_overlays,
             });
@@ -565,18 +560,25 @@ mod tests {
     }
 
     #[test]
-    fn parses_and_bounds_aspect_ratios() {
-        assert_eq!(AspectRatio::parse(" 21 : 9 "), AspectRatio::new(21, 9));
-        assert_eq!(AspectRatio::parse("16:9:4"), None);
-        assert_eq!(AspectRatio::parse("0:9"), None);
-        assert_eq!(AspectRatio::parse("5:1"), None);
+    fn reads_exact_sizes_for_the_global_default_and_profiles() {
+        let settings =
+            parse_all("@global|1920x1080\n2560x1080,overlays=0|C:\\Games\\Example.exe\n").unwrap();
+        assert_eq!(
+            settings.default_content_area,
+            ContentArea::size(1920, 1080).unwrap()
+        );
+        let profile = settings
+            .profile_for(Path::new(r"C:\Games\Example.exe"))
+            .unwrap();
+        assert_eq!(profile.content_area, ContentArea::size(2560, 1080).unwrap());
+        assert_eq!(profile.show_overlays, Some(false));
     }
 
     #[test]
     fn new_settings_default_to_21_9() {
         assert_eq!(
-            AppSettings::default().default_aspect_ratio,
-            AspectRatio::new(21, 9).unwrap()
+            AppSettings::default().default_content_area,
+            ContentArea::ratio(21, 9).unwrap()
         );
     }
 
@@ -664,8 +666,8 @@ mod tests {
         let loaded = AppSettings::load(&path).unwrap().0;
 
         assert_eq!(
-            loaded.ratio_for(Path::new(r"G:\Games\Example.exe")),
-            AspectRatio::new(16, 9)
+            loaded.content_area_for(Path::new(r"G:\Games\Example.exe")),
+            ContentArea::ratio(16, 9)
         );
         assert!(source_path.exists());
         fs::remove_dir_all(directory).unwrap();
@@ -687,13 +689,13 @@ mod tests {
 
         let (loaded, warning) = AppSettings::load(&path).unwrap();
         assert_eq!(
-            loaded.default_aspect_ratio,
-            AspectRatio::new(32, 9).unwrap()
+            loaded.default_content_area,
+            ContentArea::ratio(32, 9).unwrap()
         );
         assert!(!loaded.always_on);
         assert_eq!(
-            loaded.ratio_for(Path::new(r"G:\Games\Example.exe")),
-            AspectRatio::new(16, 9)
+            loaded.content_area_for(Path::new(r"G:\Games\Example.exe")),
+            ContentArea::ratio(16, 9)
         );
         assert!(warning.unwrap().contains("(2, 3)"));
         let backup = directory.join(format!("{CONFIG_FILE_NAME}.bad"));
@@ -723,19 +725,19 @@ mod tests {
         ));
         let mut settings = AppSettings::default();
         assert_eq!(
-            settings.default_aspect_ratio,
-            AspectRatio::new(21, 9).unwrap()
+            settings.default_content_area,
+            ContentArea::ratio(21, 9).unwrap()
         );
         settings.upsert(AppProfile {
             executable: PathBuf::from(r"C:\Games\Example.exe"),
-            aspect_ratio: AspectRatio::new(16, 9).unwrap(),
+            content_area: ContentArea::ratio(16, 9).unwrap(),
             effect: None,
             show_overlays: None,
         });
-        settings.default_aspect_ratio = AspectRatio::new(21, 9).unwrap();
+        settings.default_content_area = ContentArea::ratio(21, 9).unwrap();
         settings.upsert(AppProfile {
             executable: PathBuf::from(r"c:\games\example.EXE"),
-            aspect_ratio: AspectRatio::new(16, 9).unwrap(),
+            content_area: ContentArea::ratio(16, 9).unwrap(),
             effect: None,
             show_overlays: None,
         });
@@ -744,24 +746,24 @@ mod tests {
         let mut loaded = AppSettings::load(&path).unwrap().0;
         assert_eq!(loaded.profiles.len(), 1);
         assert_eq!(
-            loaded.default_aspect_ratio,
-            AspectRatio::new(21, 9).unwrap()
+            loaded.default_content_area,
+            ContentArea::ratio(21, 9).unwrap()
         );
         assert_eq!(
-            loaded.ratio_for(Path::new(r"C:\GAMES\EXAMPLE.exe")),
-            AspectRatio::new(16, 9)
+            loaded.content_area_for(Path::new(r"C:\GAMES\EXAMPLE.exe")),
+            ContentArea::ratio(16, 9)
         );
         loaded.upsert(AppProfile {
             executable: PathBuf::from(r"C:\Games\Example.exe"),
-            aspect_ratio: AspectRatio::new(32, 9).unwrap(),
+            content_area: ContentArea::ratio(32, 9).unwrap(),
             effect: None,
             show_overlays: None,
         });
         loaded.save(&path).unwrap();
         loaded = AppSettings::load(&path).unwrap().0;
         assert_eq!(
-            loaded.ratio_for(Path::new(r"C:\Games\Example.exe")),
-            AspectRatio::new(32, 9)
+            loaded.content_area_for(Path::new(r"C:\Games\Example.exe")),
+            ContentArea::ratio(32, 9)
         );
         assert!(loaded.remove(Path::new(r"c:\games\example.exe")));
         assert_eq!(loaded.profiles.len(), 0);
@@ -781,12 +783,12 @@ mod tests {
         fs::write(&path, "16:9|G:\\Games\\Example.exe\n").unwrap();
         let loaded = AppSettings::load(&path).unwrap().0;
         assert_eq!(
-            loaded.default_aspect_ratio,
-            AspectRatio::new(21, 9).unwrap()
+            loaded.default_content_area,
+            ContentArea::ratio(21, 9).unwrap()
         );
         assert_eq!(
-            loaded.ratio_for(Path::new(r"G:\Games\Example.exe")),
-            AspectRatio::new(16, 9)
+            loaded.content_area_for(Path::new(r"G:\Games\Example.exe")),
+            ContentArea::ratio(16, 9)
         );
         fs::remove_file(path).unwrap();
     }
@@ -803,7 +805,7 @@ mod tests {
         ];
         let profiles = vec![AppProfile {
             executable: PathBuf::from(r"C:\Games\Shared.exe"),
-            aspect_ratio: AspectRatio::new(16, 9).unwrap(),
+            content_area: ContentArea::ratio(16, 9).unwrap(),
             effect: None,
             show_overlays: None,
         }];
@@ -828,7 +830,7 @@ mod tests {
     fn profiles_sort_by_file_name_ignoring_case_then_path() {
         let profile = |path: &str| AppProfile {
             executable: PathBuf::from(path),
-            aspect_ratio: AspectRatio::new(16, 9).unwrap(),
+            content_area: ContentArea::ratio(16, 9).unwrap(),
             effect: None,
             show_overlays: None,
         };
@@ -876,7 +878,7 @@ mod tests {
         let mut settings = AppSettings::default();
         settings.upsert(AppProfile {
             executable: PathBuf::from(r"C:\Games\Example.exe"),
-            aspect_ratio: AspectRatio::new(21, 9).unwrap(),
+            content_area: ContentArea::ratio(21, 9).unwrap(),
             effect: None,
             show_overlays: None,
         });
@@ -885,7 +887,7 @@ mod tests {
             settings.active_profile(true, true, Some(matching)),
             Some(ActiveProfile {
                 executable: Some(matching.to_path_buf()),
-                aspect_ratio: AspectRatio::new(21, 9).unwrap(),
+                content_area: ContentArea::ratio(21, 9).unwrap(),
                 effect: EffectSettings::default(),
                 show_overlays: true,
             })
@@ -902,20 +904,20 @@ mod tests {
     #[test]
     fn always_on_renders_unprofiled_apps_at_the_default_ratio() {
         let mut settings = AppSettings {
-            default_aspect_ratio: AspectRatio::new(16, 9).unwrap(),
+            default_content_area: ContentArea::ratio(16, 9).unwrap(),
             always_on: true,
             ..AppSettings::default()
         };
         settings.upsert(AppProfile {
             executable: PathBuf::from(r"C:\Games\Example.exe"),
-            aspect_ratio: AspectRatio::new(4, 3).unwrap(),
+            content_area: ContentArea::ratio(4, 3).unwrap(),
             effect: None,
             show_overlays: None,
         });
         let profiled = Path::new(r"C:\Games\Example.exe");
         let default = Some(ActiveProfile {
             executable: None,
-            aspect_ratio: AspectRatio::new(16, 9).unwrap(),
+            content_area: ContentArea::ratio(16, 9).unwrap(),
             effect: EffectSettings::default(),
             show_overlays: true,
         });
@@ -924,7 +926,7 @@ mod tests {
             settings.active_profile(true, true, Some(profiled)),
             Some(ActiveProfile {
                 executable: Some(profiled.to_path_buf()),
-                aspect_ratio: AspectRatio::new(4, 3).unwrap(),
+                content_area: ContentArea::ratio(4, 3).unwrap(),
                 effect: EffectSettings::default(),
                 show_overlays: true,
             })
@@ -1007,7 +1009,7 @@ mod tests {
         for (name, show_overlays) in [("Follow.exe", None), ("On.exe", Some(true))] {
             settings.upsert(AppProfile {
                 executable: PathBuf::from(format!(r"C:\Games\{name}")),
-                aspect_ratio: AspectRatio::new(16, 9).unwrap(),
+                content_area: ContentArea::ratio(16, 9).unwrap(),
                 effect: None,
                 show_overlays,
             });
@@ -1054,7 +1056,7 @@ mod tests {
         ] {
             settings.upsert(AppProfile {
                 executable: PathBuf::from(format!(r"C:\Games\{name}")),
-                aspect_ratio: AspectRatio::new(16, 9).unwrap(),
+                content_area: ContentArea::ratio(16, 9).unwrap(),
                 effect,
                 show_overlays,
             });
@@ -1111,13 +1113,13 @@ mod tests {
         };
         settings.upsert(AppProfile {
             executable: PathBuf::from(r"C:\Games\Custom.exe"),
-            aspect_ratio: AspectRatio::new(16, 9).unwrap(),
+            content_area: ContentArea::ratio(16, 9).unwrap(),
             effect: Some(custom),
             show_overlays: None,
         });
         settings.upsert(AppProfile {
             executable: PathBuf::from(r"C:\Games\Global.exe"),
-            aspect_ratio: AspectRatio::new(4, 3).unwrap(),
+            content_area: ContentArea::ratio(4, 3).unwrap(),
             effect: None,
             show_overlays: None,
         });
